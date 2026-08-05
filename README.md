@@ -9,7 +9,7 @@ Want a 14″ airless tire for your cart project but only own an Ender-sized prin
 wheel you want and the envelope you have; Wheelwright hands you the pieces, the print settings,
 and the glue-up instructions.
 
-![Wheelwright — 14in cart wheel exploded into 6 dovetailed segments](docs/screenshot-cart.png)
+![Wheelwright — 14in cart wheel exploded into 6 dovetailed segments, spoked web and lugged tread](docs/screenshot-cart.png)
 
 ## What it does
 
@@ -29,7 +29,7 @@ and the glue-up instructions.
 
 | Airless TPU rover wheel (flex-web, hex bore) | Printer-fit check against your envelope |
 |---|---|
-| ![Rover airless wheel](docs/screenshot-rover.png) | ![Printer fit view](docs/screenshot-fit.png) |
+| ![Rover airless wheel — six identical 60° segments with curved flex-web slots](docs/screenshot-rover.png) | ![Printer fit view — one segment print-oriented inside the usable build volume](docs/screenshot-fit.png) |
 
 ## Quickstart
 
@@ -57,7 +57,7 @@ download the KCL bundle and run `zoo kcl export --output-format=stl piece-A.kcl 
 export from Design Studio.
 
 ```sh
-npm test           # 21 unit tests: chunking math, joints, dedupe, KCL well-formedness
+npm test           # 40 unit tests: chunking math, joints, dedupe, piece profiles, KCL well-formedness
 npm run validate:kcl   # regenerates a config matrix; round-trips through Zoo's engine when a token is set
 ```
 
@@ -110,7 +110,14 @@ yet"). Bolt holes are still subtracted per piece.
 Feature-aware deduplication: the planner computes which segment windows intersect the keyway /
 D-flat / bolt holes and hashes each piece's canonical feature set. The segment-count solver
 prefers (within fit constraints) counts that match the hub's rotational symmetry — e.g. hex
-bores like 2/3/6/12 segments — so most wheels are "print one file N times".
+bores like 2/3/6/12 segments — so most wheels are "print one file N times". Bolt circles are
+phase-rotated to sit centred between the seams for the chosen N, so no piece ever carries a
+half-open hole.
+
+![Bolt-circle caster, honeycomb web — four identical 90° segments, bolt holes clear of every seam](docs/screenshot-caster.png)
+
+Honeycomb cells sit on a true hex lattice aligned to the piece bisector, so neighbouring cells
+keep a uniform wall and never merge — within a piece or across a seam.
 
 ### Adhesive guidance (the flexible-glue question)
 
@@ -136,12 +143,12 @@ for the engine:
 @settings(defaultLengthUnit = mm, kclVersion = 1.0)
 
 outlineSk = sketch(on = XY) {
-  e1 = line(start = [9.2, 0], end = [166.03, 0])
+  e1 = line(start = [9.2, 0], end = [16.346, 0])
   ...
   e10 = arc(start = [177.8, 0], end = [88.9, 153.9793], center = [0, 0])
   ...
 }
-blank = extrude(region(point = [98.68, 49.34], sketch = outlineSk), length = 50)
+blank = extrude(region(point = [86.9983, 50.2285], sketch = outlineSk), length = 50)
 
 cut1Sk = sketch(on = offsetPlane(XY, offset = -1)) {
   c1 = circle(start = [10.2, 0], center = [0, 0])
@@ -177,6 +184,7 @@ src/lib/wheel.js        the planner (pure, shared browser/server)
 src/lib/kclgen.js       KCL emitter + assembly guide generator
 src/lib/zoo.js          zoo CLI wrapper for KCL → STL
 src/lib/zip.js          dependency-free ZIP writer
+src/lib/env.js          dependency-free .env / .env.local loader
 public/                 UI (vanilla JS + vendored three.js, 2D canvas fallback)
 scripts/setup-zoo.mjs   downloads the Zoo CLI for your platform into ./bin
 scripts/validate-kcl.js engine round-trip validation for a config matrix

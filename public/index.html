@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Wheelwright — printable wheel configurator (Zoo API)</title>
+<link rel="stylesheet" href="style.css" />
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🛞</text></svg>" />
+<script type="importmap">
+{ "imports": {
+  "three": "/vendor/three.module.min.js",
+  "three/addons/controls/OrbitControls.js": "/vendor/OrbitControls.js"
+} }
+</script>
+</head>
+<body>
+<header>
+  <div class="brand">
+    <span class="logo">🛞</span>
+    <div>
+      <h1>Wheelwright</h1>
+      <p>Any wheel, any printer — parametric segments that slide together. Powered by <a href="https://zoo.dev" target="_blank" rel="noreferrer">Zoo</a>'s KCL + Design API.</p>
+    </div>
+  </div>
+  <div class="header-right">
+    <span id="zooStatus" class="pill">checking Zoo…</span>
+  </div>
+</header>
+
+<main>
+  <aside id="config">
+    <section>
+      <h2>Presets</h2>
+      <div class="preset-row">
+        <button data-preset="cart">14″ cart wheel</button>
+        <button data-preset="rover">Rover airless (TPU)</button>
+        <button data-preset="caster">Bolt-on caster</button>
+        <button data-preset="tiny">100 mm test</button>
+      </div>
+    </section>
+
+    <section>
+      <h2>Wheel</h2>
+      <label>Units
+        <select id="units">
+          <option value="mm">mm</option>
+          <option value="in">inches</option>
+        </select>
+      </label>
+      <label>Diameter <input id="diameter" type="number" step="any" value="355.6" /></label>
+      <label>Width <input id="width" type="number" step="any" value="50" /></label>
+      <label>Material
+        <select id="material">
+          <option value="petg">PETG</option>
+          <option value="pla">PLA</option>
+          <option value="abs">ABS / ASA</option>
+          <option value="tpu">TPU (flexible)</option>
+        </select>
+      </label>
+    </section>
+
+    <section>
+      <h2>Structure</h2>
+      <label>Web style
+        <select id="infill">
+          <option value="spokes">Spokes</option>
+          <option value="honeycomb">Honeycomb</option>
+          <option value="flexweb">Flex web (airless)</option>
+          <option value="solid">Solid</option>
+        </select>
+      </label>
+      <label data-show="infill:spokes">Spoke count (0 = auto) <input id="spokeCount" type="number" step="1" min="0" value="0" /></label>
+      <label>Tread
+        <select id="tread">
+          <option value="lugged">Lugged</option>
+          <option value="ribbed">Ribbed</option>
+          <option value="diamond">Diamond (both)</option>
+          <option value="slick">Slick</option>
+        </select>
+      </label>
+      <label data-show="tread:lugged,ribbed,diamond">Tread depth <input id="treadDepth" type="number" step="any" value="3.5" /></label>
+    </section>
+
+    <section>
+      <h2>Hub / mating</h2>
+      <label>Type
+        <select id="boreType">
+          <option value="keyed">Keyed shaft</option>
+          <option value="plain">Plain bore</option>
+          <option value="hex">Hex bore</option>
+          <option value="dbore">D-bore</option>
+          <option value="bolt">Bolt circle</option>
+        </select>
+      </label>
+      <label data-show="boreType:plain,keyed,dbore">Bore diameter <input id="boreDiameter" type="number" step="any" value="20" /></label>
+      <label data-show="boreType:keyed">Key width <input id="keyWidth" type="number" step="any" value="6" /></label>
+      <label data-show="boreType:keyed">Key depth <input id="keyDepth" type="number" step="any" value="2.8" /></label>
+      <label data-show="boreType:hex">Across flats <input id="hexAcrossFlats" type="number" step="any" value="13" /></label>
+      <label data-show="boreType:dbore">Flat offset (0 = auto) <input id="flatOffset" type="number" step="any" value="0" /></label>
+      <label data-show="boreType:bolt">Bolt count <input id="boltCount" type="number" step="1" min="2" max="12" value="4" /></label>
+      <label data-show="boreType:bolt">Bolt circle Ø <input id="boltCircle" type="number" step="any" value="60" /></label>
+      <label data-show="boreType:bolt">Bolt hole Ø <input id="boltHoleDia" type="number" step="any" value="5.5" /></label>
+      <label data-show="boreType:bolt">Pilot bore Ø <input id="pilotDia" type="number" step="any" value="12" /></label>
+      <label>Bore fit clearance <input id="boreClearance" type="number" step="any" value="0.2" /></label>
+    </section>
+
+    <section>
+      <h2>Printer envelope</h2>
+      <label>Bed X <input id="printerX" type="number" step="any" value="220" /></label>
+      <label>Bed Y <input id="printerY" type="number" step="any" value="220" /></label>
+      <label>Height Z <input id="printerZ" type="number" step="any" value="250" /></label>
+      <label>Edge margin <input id="printerMargin" type="number" step="any" value="10" /></label>
+      <label>Segments (0 = auto) <input id="segmentsOverride" type="number" step="1" min="0" max="16" value="0" /></label>
+      <label>Joint clearance / side <input id="jointClearance" type="number" step="any" value="0.15" /></label>
+    </section>
+  </aside>
+
+  <section id="viewport">
+    <canvas id="stage"></canvas>
+    <div id="viewbar">
+      <label class="explode">Explode <input id="explode" type="range" min="0" max="100" value="18" /></label>
+      <label class="chk"><input id="fitView" type="checkbox" /> Printer-fit view</label>
+      <span id="renderMode" class="dim"></span>
+    </div>
+  </section>
+
+  <aside id="output">
+    <section id="planSummary">
+      <h2>Build plan</h2>
+      <div id="summary" class="summary"></div>
+      <div id="pieceList"></div>
+      <div id="warnings"></div>
+    </section>
+    <section>
+      <h2>Fabricate</h2>
+      <div class="btn-row">
+        <button id="dlKclZip" class="primary">Download KCL bundle (.zip)</button>
+        <button id="dlStl">Export STL via Zoo</button>
+      </div>
+      <div id="fileLinks"></div>
+      <div id="exportMsg" class="hint"></div>
+    </section>
+    <section id="glueBox">
+      <h2>Joinery &amp; adhesive</h2>
+      <div id="glue"></div>
+    </section>
+  </aside>
+</main>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>

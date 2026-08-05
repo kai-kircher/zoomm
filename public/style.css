@@ -139,6 +139,11 @@ input[type="number"], select {
   font: inherit;
 }
 input[type="number"]:focus, select:focus { outline: 1px solid var(--accent); }
+/* number fields are drag-adjustable (see scrub.js) — until one is focused for
+   typing, advertise the gesture with the resize cursor. */
+input[type="number"] { cursor: ew-resize; }
+input[type="number"]:focus { cursor: text; }
+body.scrubbing, body.scrubbing * { cursor: ew-resize !important; user-select: none; }
 
 .preset-row { display: flex; flex-wrap: wrap; gap: 6px; }
 .preset-row button {

@@ -116,6 +116,53 @@ test('honeycomb cell count is bounded', () => {
   }
 });
 
+// Convex-polygon separation (SAT): overlapping hex cells merged into open
+// voids in the CAD and broke the preview triangulation.
+function polysOverlap(p1, p2) {
+  for (const pts of [p1, p2]) {
+    for (let i = 0; i < pts.length; i++) {
+      const a = pts[i];
+      const b = pts[(i + 1) % pts.length];
+      const ax = [a[1] - b[1], b[0] - a[0]];
+      const proj = (poly) => poly.map((p) => p[0] * ax[0] + p[1] * ax[1]);
+      const q1 = proj(p1);
+      const q2 = proj(p2);
+      if (Math.max(...q1) < Math.min(...q2) || Math.max(...q2) < Math.min(...q1)) return false;
+    }
+  }
+  return true;
+}
+
+test('honeycomb cells never overlap and stay inside the web band', () => {
+  const cases = [
+    { infill: 'honeycomb' },
+    { diameter: 200, infill: 'honeycomb' },
+    { diameter: 500, width: 60, infill: 'honeycomb', printer: { x: 300, y: 300, z: 300, margin: 10 } },
+    { diameter: 300, infill: 'honeycomb', segmentsOverride: 2 },
+    { diameter: 700, infill: 'honeycomb', segmentsOverride: 16 },
+    { diameter: 400, infill: 'honeycomb', bore: { type: 'bolt', boltCount: 5, boltCircle: 80 } },
+  ];
+  for (const input of cases) {
+    const plan = planWheel(input);
+    if (plan.infillInfo.style !== 'honeycomb') continue;
+    const hexes = plan.uniquePieces[0].cutters.filter((c) => c.id.startsWith('hex'));
+    assert.ok(hexes.length > 0);
+    for (let i = 0; i < hexes.length; i++) {
+      for (let j = i + 1; j < hexes.length; j++) {
+        assert.ok(!polysOverlap(hexes[i].pts, hexes[j].pts), `cells ${hexes[i].id} and ${hexes[j].id} overlap (N=${plan.N})`);
+      }
+      for (const p of hexes[i].pts) {
+        const r = Math.hypot(p[0], p[1]);
+        assert.ok(r >= plan.radii.rWebIn - 1e-6 && r <= plan.radii.rWebOut + 1e-6, `${hexes[i].id} leaves the web band (r=${r.toFixed(2)})`);
+        if (plan.N > 1) {
+          const A = (plan.segAngle * Math.PI) / 180;
+          assert.ok(p[1] >= -1e-6 && Math.sin(A) * p[0] - Math.cos(A) * p[1] >= -1e-6, `${hexes[i].id} crosses a seam plane`);
+        }
+      }
+    }
+  }
+});
+
 // --- bolt holes vs segment seams -------------------------------------------
 
 // Reassemble the full wheel's bolt holes: every bolt cutter of every piece,

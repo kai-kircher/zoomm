@@ -183,6 +183,15 @@ function regularPoly(cx, cy, circumR, n, startAngleDeg) {
   return pts;
 }
 
+// Distance from the origin to segment ab (an edge can pass closer to the
+// center than either endpoint).
+function segDistToOrigin(a, b) {
+  const d = [b[0] - a[0], b[1] - a[1]];
+  const dd = d[0] * d[0] + d[1] * d[1] || 1;
+  const t = clamp(-(a[0] * d[0] + a[1] * d[1]) / dd, 0, 1);
+  return Math.hypot(a[0] + t * d[0], a[1] + t * d[1]);
+}
+
 function rotPt([x, y], aDeg) {
   const c = Math.cos(d2r(aDeg));
   const s = Math.sin(d2r(aDeg));
@@ -617,47 +626,56 @@ export function planWheel(input = {}) {
       infillInfo = { style: 'solid' };
     }
   } else if (infill === 'honeycomb' && bandW > 14) {
+    // Hex cells on a true honeycomb lattice, aligned to the piece bisector:
+    // uniform `wall` between every pair of neighbouring cells by
+    // construction. A cell is kept only when it fits entirely inside the web
+    // band and clear of the seam keep-outs. (Per-row polar placement used to
+    // re-pitch and re-centre every row, so the half-pitch stagger drifted
+    // out of phase and staggered rows overlapped — cells merged into open
+    // voids in the CAD and broke the preview triangulation.)
     let cr = clamp(bandW / 8, 4, 12); // hex circumradius
     const wall = 2.6;
+    const dFace = jointOutN + 2.5; // straight-line keep-out from each seam plane
+    const bis = A / 2;
+    const eR = [Math.cos(d2r(bis)), Math.sin(d2r(bis))]; // lattice axis along the bisector
+    const eT = [-eR[1], eR[0]];
+    const sinA = Math.sin(d2r(A));
+    const cosA = Math.cos(d2r(A));
+    const rMid = (rWebIn + rWebOut) / 2;
+    const fits = (pts) => {
+      for (const [x, y] of pts) {
+        if (x * x + y * y > rWebOut * rWebOut) return false;
+        // Signed distances to the seam planes through faces 0 and A.
+        if (N > 1 && (y < dFace || sinA * x - cosA * y < dFace)) return false;
+      }
+      for (let i = 0; i < pts.length; i++) {
+        if (segDistToOrigin(pts[i], pts[(i + 1) % pts.length]) < rWebIn) return false;
+      }
+      return true;
+    };
     let cells = [];
     for (let attempt = 0; attempt < 4; attempt++) {
       cells = [];
-      const rowPitch = cr * 1.55 + wall;
-      const rows = Math.max(1, Math.round((bandW - wall) / rowPitch));
-      for (let i = 0; i < rows; i++) {
-        const rc = rWebIn + (bandW / rows) * (i + 0.5);
-        const cellHalf = r2d(cr / rc);
-        const pitchAng = r2d((cr * Math.sqrt(3) + wall) / rc);
-        if (N === 1) {
-          const count = Math.max(1, Math.floor(360 / pitchAng));
-          const actual = 360 / count;
-          const phase = i % 2 ? actual / 2 : 0;
-          for (let jj = 0; jj < count; jj++) cells.push({ rc: rnd(rc), ang: rnd(phase + jj * actual, 3) });
-        } else {
-          // Center the row's cells inside the joint keep-outs.
-          const lo = faceMarginAng(rc) + cellHalf;
-          const hi = A - faceMarginAng(rc) - cellHalf;
-          if (hi <= lo) continue;
-          const span = hi - lo;
-          const count = 1 + Math.floor(span / pitchAng);
-          const stagger = i % 2 ? pitchAng / 2 : 0;
-          const start = lo + (span - (count - 1) * pitchAng) / 2 + stagger;
-          for (let jj = 0; jj < count; jj++) {
-            const ang = start + jj * pitchAng;
-            if (ang < lo - 1e-9 || ang > hi + 1e-9) continue;
-            cells.push({ rc: rnd(rc), ang: rnd(ang, 3) });
-          }
+      const pitchT = cr * Math.sqrt(3) + wall; // across-flats + wall
+      const pitchR = cr * 1.5 + (wall * Math.sqrt(3)) / 2;
+      const jMax = Math.ceil((rMid + rWebOut + cr) / pitchR);
+      const iMax = Math.ceil((rWebOut + cr) / pitchT);
+      for (let j = -jMax; j <= jMax; j++) {
+        const v = rMid + j * pitchR;
+        for (let i = -iMax; i <= iMax; i++) {
+          const u = (i + (j & 1 ? 0.5 : 0)) * pitchT;
+          const pts = regularPoly(u * eT[0] + v * eR[0], u * eT[1] + v * eR[1], cr, 6, bis);
+          if (fits(pts)) cells.push(pts);
         }
       }
       if (cells.length <= 64) break;
       cr *= 1.28;
     }
-    cells.forEach((cell, i) => {
-      const pc = polar(cell.rc, cell.ang);
+    cells.forEach((pts, i) => {
       shared.push({
         id: `hex${i + 1}`,
         shape: 'poly',
-        pts: regularPoly(pc[0], pc[1], cr, 6, cell.ang),
+        pts: pts.map((q) => [rnd(q[0]), rnd(q[1])]),
         ...zThrough,
       });
     });

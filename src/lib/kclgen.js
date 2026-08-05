@@ -29,8 +29,7 @@ const SUBTRACT_BATCH = 12;
 // Six decimals — a thousandth of a micron. Coordinates are printed finer than
 // anything prints or measures because the engine solves each arc from its
 // endpoints and centre: an endpoint a rounding step off its own radius is an
-// arc that does not quite close, and a profile is only as closed as its worst
-// entity. See snapLoop below.
+// arc that does not quite close. See snapArcEndpoints below.
 function fmt(v) {
   if (!Number.isFinite(v)) return '0';
   let x = Math.round(v * 1e6) / 1e6;
@@ -39,37 +38,54 @@ function fmt(v) {
 }
 const pt = ([x, y]) => `[${fmt(x)}, ${fmt(y)}]`;
 
-// Put a point exactly on the circle (c, r) it is meant to lie on.
-function onCircle(p, c, r) {
-  const dx = p[0] - c[0];
-  const dy = p[1] - c[1];
-  const L = Math.hypot(dx, dy) || 1;
-  return [c[0] + (dx / L) * r, c[1] + (dy / L) * r];
-}
-
-// The planner rounds its coordinates to a micron for legibility, which leaves
-// every arc endpoint a fraction of that off the exact radius. One arc absorbs
-// it; a rim carrying fifty tread-bar arcs, or a filleted honeycomb cell with
-// twelve, does not — the engine gives up with "Cannot close a path that is
-// non-planar or with duplicate vertices" or "Unable to create a region that
-// contains the requested query point". Snap each arc end onto its own circle
-// and hand the corrected vertex to the neighbouring segment, so the loop
-// comes out both watertight and exactly circular.
-function snapLoop(segs) {
-  const n = segs.length;
-  const v = segs.map((s) => [...s.a]);
-  segs.forEach((s, i) => {
+// An arc's two endpoints must be the same distance from its center, or the
+// engine cannot build a region from the loop — and says so by blaming the
+// region's query point ("Unable to create a region that contains the requested
+// query point"), which points at the wrong thing entirely. Fillet tangent
+// points computed and rounded independently drift apart by ~1e-3 mm, which is
+// enough. So endpoints are projected onto the mean radius before emitting, and
+// the neighbouring entity that shares each endpoint is moved with it, keeping
+// the loop chained. Measured on engine 0.2.186: 8e-4 mm of mismatch is
+// rejected, 1e-4 is accepted (see docs/zoo-api-notes.md, WW-3).
+//
+// Tread bars put fifty-odd arcs on a single rim loop, well past the handful a
+// filleted honeycomb cell carries, and a loop is only as closed as its worst
+// entity — which is why the printed precision above went to six decimals.
+// Snapping alone would leave the residue at the 5e-5 the 4-decimal emitter
+// used to print, only fifteen times under a mismatch the engine is known to
+// reject; together they hold it near 1e-6.
+function snapArcEndpoints(segs) {
+  const out = segs.map((s) => ({ ...s, a: [...s.a], b: [...s.b] }));
+  const dist = (p, c) => Math.hypot(p[0] - c[0], p[1] - c[1]);
+  const onto = (p, c, r) => {
+    const d = dist(p, c);
+    return d < 1e-12 ? p : [c[0] + ((p[0] - c[0]) * r) / d, c[1] + ((p[1] - c[1]) * r) / d];
+  };
+  const near = (p, q) => Math.hypot(p[0] - q[0], p[1] - q[1]) < 1e-6;
+  out.forEach((s, i) => {
     if (s.kind !== 'arc') return;
-    v[i] = onCircle(s.a, s.center, s.radius);
-    v[(i + 1) % n] = onCircle(s.b, s.center, s.radius);
+    const c = s.center;
+    const r = (dist(s.a, c) + dist(s.b, c)) / 2;
+    const a = onto(s.a, c, r);
+    const b = onto(s.b, c, r);
+    for (const n of [out[(i + out.length - 1) % out.length], out[(i + 1) % out.length]]) {
+      if (n === s) continue;
+      for (const end of ['a', 'b']) {
+        if (near(n[end], s.a)) n[end] = a;
+        else if (near(n[end], s.b)) n[end] = b;
+      }
+    }
+    s.a = a;
+    s.b = b;
   });
-  return segs.map((s, i) => ({ ...s, a: v[i], b: v[(i + 1) % n] }));
+  return out;
 }
 
-function emitPathEntities(rawSegs, prefix = 'e', indent = '  ') {
+// `prefix` keeps entity names unique: a section sketch now holds the piece
+// boundary and every through-hole loop side by side.
+function emitPathEntities(segs, prefix = 'e', indent = '  ') {
   const lines = [];
-  const segs = snapLoop(rawSegs);
-  segs.forEach((s, i) => {
+  snapArcEndpoints(segs).forEach((s, i) => {
     const name = `${prefix}${i + 1}`;
     if (s.kind === 'line') {
       lines.push(`${indent}${name} = line(start = ${pt(s.a)}, end = ${pt(s.b)})`);

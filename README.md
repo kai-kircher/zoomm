@@ -289,6 +289,7 @@ Request body = the same parameter object the form produces (all fields optional;
 ```
 server.js               express: static UI + API + Zoo export proxy
 src/lib/wheel.js        the planner (pure, shared browser/server)
+src/lib/units.js        unit switching: rewrites the form so lengths keep their physical size
 src/lib/kclgen.js       KCL emitter + assembly guide generator
 src/lib/zoo.js          zoo CLI wrapper for KCL → STL
 src/lib/zip.js          dependency-free ZIP writer

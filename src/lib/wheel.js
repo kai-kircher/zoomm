@@ -87,7 +87,9 @@ export const DEFAULTS = Object.freeze({
   segmentsOverride: 0, // 0 = auto
 });
 
-const LENGTH_FIELDS = [
+// Every parameter carrying a length unit. The configurator form mirrors this
+// list (LENGTH_INPUTS in units.js) so switching units rewrites all of them.
+export const LENGTH_FIELDS = [
   ['diameter'],
   ['width'],
   ['treadDepth'],

@@ -19,6 +19,10 @@ const CONFIGS = [
   ['one-piece-plain', { diameter: 120, width: 30, bore: { type: 'plain', diameter: 8 } }],
   ['rover-tpu-flexweb-hex', { diameter: 260, width: 60, material: 'tpu', infill: 'flexweb', tread: 'ribbed', bore: { type: 'hex', hexAcrossFlats: 13 } }],
   ['caster-bolt-honeycomb', { diameter: 160, width: 45, infill: 'honeycomb', tread: 'slick', bore: { type: 'bolt', boltCount: 4, boltCircle: 60, boltHoleDia: 5.5, pilotDia: 12 } }],
+  // Honeycomb cells can be round (circle cutters) or filleted (lines + corner
+  // arcs) — both are shapes the engine sees nowhere else in the matrix.
+  ['honeycomb-round-cells', { diameter: 400, width: 70, infill: 'honeycomb', tread: 'slick', honeycomb: { cellSize: 18, wall: 3, cellShape: 'round' } }],
+  ['honeycomb-filleted-cells', { diameter: 400, width: 70, infill: 'honeycomb', tread: 'ribbed', honeycomb: { cellSize: 18, cornerRadius: 2.5, orientation: 'tangential' } }],
   ['wagon-bolt-segmented', { diameter: 355.6, bore: { type: 'bolt', boltCount: 4, boltCircle: 60, boltHoleDia: 5.5, pilotDia: 12 } }],
   ['dbore-diamond-solid', { diameter: 200, width: 45, infill: 'solid', tread: 'diamond', bore: { type: 'dbore', diameter: 12 } }],
   // Segmented bolt hub (N=8 at the default diameter): the pilot bore must be

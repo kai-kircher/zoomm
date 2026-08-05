@@ -116,6 +116,116 @@ test('honeycomb cell count is bounded', () => {
   }
 });
 
+test('honeycomb budget is a parameter, and cells grow to respect it', () => {
+  const base = { diameter: 500, width: 60, infill: 'honeycomb', printer: { x: 300, y: 300, z: 300, margin: 10 } };
+  const small = planWheel({ ...base, honeycomb: { maxCells: 12 } });
+  const big = planWheel({ ...base, honeycomb: { maxCells: 200 } });
+  assert.equal(small.infillInfo.style, 'honeycomb');
+  assert.ok(small.infillInfo.cellsPerSegment <= 12, `${small.infillInfo.cellsPerSegment} cells within a 12-cell budget`);
+  assert.ok(big.infillInfo.cellsPerSegment > small.infillInfo.cellsPerSegment, 'a bigger budget keeps more, smaller cells');
+  assert.ok(big.infillInfo.cellAcrossFlats < small.infillInfo.cellAcrossFlats);
+});
+
+test('honeycomb cell size and wall are honoured, and an over-budget size is grown with a note', () => {
+  const fits = planWheel({ diameter: 400, width: 60, infill: 'honeycomb', honeycomb: { cellSize: 24, wall: 4 }, printer: { x: 300, y: 300, z: 300, margin: 10 } });
+  assert.equal(fits.infillInfo.cellAcrossFlats, 24);
+  assert.equal(fits.infillInfo.wall, 4);
+  const cells = fits.uniquePieces[0].cutters.filter((c) => c.id.startsWith('hex'));
+  assert.ok(cells.length > 1);
+  for (const c of cells) {
+    // Across-flats of a regular hexagon = 2 × the vertex-to-center distance × cos30.
+    const ctr = c.pts.reduce((s, q) => [s[0] + q[0] / 6, s[1] + q[1] / 6], [0, 0]);
+    for (const q of c.pts) {
+      const af = 2 * Math.hypot(q[0] - ctr[0], q[1] - ctr[1]) * Math.cos(Math.PI / 6);
+      assert.ok(Math.abs(af - 24) < 0.02, `cell measures ${af.toFixed(2)} mm across flats`);
+    }
+  }
+  // Congruent, identically oriented hexes: a centre spacing of across-flats +
+  // wall is exactly a `wall` gap between the nearest pair.
+  const ctrs = cells.map((c) => c.pts.reduce((s, q) => [s[0] + q[0] / 6, s[1] + q[1] / 6], [0, 0]));
+  let closest = Infinity;
+  for (let i = 0; i < ctrs.length; i++) {
+    for (let j = i + 1; j < ctrs.length; j++) closest = Math.min(closest, Math.hypot(ctrs[i][0] - ctrs[j][0], ctrs[i][1] - ctrs[j][1]));
+  }
+  assert.ok(closest >= 24 + 4 - 0.01, `nearest cells ${closest.toFixed(2)} mm apart, need ${24 + 4}`);
+
+  const grown = planWheel({ diameter: 400, width: 60, infill: 'honeycomb', honeycomb: { cellSize: 4, maxCells: 20 }, printer: { x: 300, y: 300, z: 300, margin: 10 } });
+  assert.ok(grown.infillInfo.cellsPerSegment <= 20);
+  assert.ok(grown.infillInfo.cellAcrossFlats > 4);
+  assert.ok(grown.notes.some((n) => /cell size grown/i.test(n)), 'the size change is reported');
+});
+
+test('honeycomb cell size and wall follow the unit setting', () => {
+  const inMm = { diameter: 400, width: 60, treadDepth: 3.5, infill: 'honeycomb', bore: { type: 'plain', diameter: 20 }, printer: { x: 300, y: 300, z: 300, margin: 10 } };
+  const toIn = (v) => v / IN;
+  const mm = planWheel({ ...inMm, honeycomb: { cellSize: 25.4, wall: 2.54 } });
+  const inch = planWheel({
+    units: 'in',
+    diameter: toIn(inMm.diameter),
+    width: toIn(inMm.width),
+    treadDepth: toIn(inMm.treadDepth),
+    infill: 'honeycomb',
+    bore: { type: 'plain', diameter: toIn(20) },
+    printer: { x: toIn(300), y: toIn(300), z: toIn(300), margin: toIn(10) },
+    honeycomb: { cellSize: 1, wall: 0.1 },
+  });
+  assert.equal(inch.infillInfo.cellAcrossFlats, mm.infillInfo.cellAcrossFlats);
+  assert.equal(inch.infillInfo.cellsPerSegment, mm.infillInfo.cellsPerSegment);
+});
+
+test('round cells are the hex inscribed circle; corner radius is capped there', () => {
+  const base = { diameter: 400, width: 60, infill: 'honeycomb', printer: { x: 300, y: 300, z: 300, margin: 10 } };
+  const hex = planWheel({ ...base, honeycomb: { cellSize: 20 } });
+  const round = planWheel({ ...base, honeycomb: { cellSize: 20, cellShape: 'round' } });
+  const capped = planWheel({ ...base, honeycomb: { cellSize: 20, cornerRadius: 999 } });
+
+  // Same lattice, so the round option only changes the cell outline.
+  assert.equal(round.infillInfo.cellsPerSegment, hex.infillInfo.cellsPerSegment);
+  assert.equal(round.infillInfo.cellShape, 'round');
+  assert.equal(capped.infillInfo.cellShape, 'round');
+  assert.ok(capped.notes.some((n) => /corner radius capped/i.test(n)));
+
+  const circles = round.uniquePieces[0].cutters.filter((c) => c.id.startsWith('hex'));
+  assert.equal(circles.length, round.infillInfo.cellsPerSegment);
+  for (const c of circles) {
+    assert.equal(c.shape, 'circle');
+    assert.ok(Math.abs(c.r - 10) < 0.01, `round cell Ø${(2 * c.r).toFixed(2)} = the 20 mm across-flats width`);
+    const r = Math.hypot(c.c[0], c.c[1]);
+    assert.ok(r - c.r >= round.radii.rWebIn - 0.01 && r + c.r <= round.radii.rWebOut + 0.01, 'round cell stays in the web band');
+  }
+});
+
+test('rounded hex corners stay inside the sharp cell', () => {
+  const plan = planWheel({ diameter: 400, width: 60, infill: 'honeycomb', honeycomb: { cellSize: 20, cornerRadius: 3 }, printer: { x: 300, y: 300, z: 300, margin: 10 } });
+  assert.equal(plan.infillInfo.cellShape, 'rounded hex');
+  assert.equal(plan.infillInfo.cornerRadius, 3);
+  const cells = plan.uniquePieces[0].cutters.filter((c) => c.id.startsWith('hex'));
+  assert.ok(cells.length > 1);
+  const circumradius = 20 / Math.sqrt(3);
+  for (const c of cells) {
+    assert.equal(c.shape, 'path');
+    assert.equal(c.segs.length, 12, 'six edges and six corner arcs');
+    for (let i = 0; i < c.segs.length; i++) {
+      const s = c.segs[i];
+      const nxt = c.segs[(i + 1) % c.segs.length];
+      assert.ok(Math.hypot(s.b[0] - nxt.a[0], s.b[1] - nxt.a[1]) < 1e-3, 'the cell loop is closed');
+      if (s.kind === 'arc') {
+        assert.equal(s.radius, 3);
+        for (const q of [s.a, s.b]) {
+          assert.ok(Math.abs(Math.hypot(q[0] - s.center[0], q[1] - s.center[1]) - 3) < 5e-3, 'arc endpoints sit on the fillet');
+        }
+      }
+      // Every point of a filleted cell lies within the sharp hexagon it came from.
+      for (const q of [s.a, s.b]) {
+        const d = Math.hypot(q[0] - c.interior[0], q[1] - c.interior[1]);
+        assert.ok(d <= circumradius + 1e-3, `point ${d.toFixed(2)} mm from centre exceeds the ${circumradius.toFixed(2)} mm cell`);
+        const r = Math.hypot(q[0], q[1]);
+        assert.ok(r >= plan.radii.rWebIn - 0.01 && r <= plan.radii.rWebOut + 0.01, 'rounded cell stays in the web band');
+      }
+    }
+  }
+});
+
 // Convex-polygon separation (SAT): overlapping hex cells merged into open
 // voids in the CAD and broke the preview triangulation.
 function polysOverlap(p1, p2) {
@@ -141,6 +251,13 @@ test('honeycomb cells never overlap and stay inside the web band', () => {
     { diameter: 300, infill: 'honeycomb', segmentsOverride: 2 },
     { diameter: 700, infill: 'honeycomb', segmentsOverride: 16 },
     { diameter: 400, infill: 'honeycomb', bore: { type: 'bolt', boltCount: 5, boltCircle: 80 } },
+    // Every honeycomb knob rides the same lattice, so the guarantee must hold
+    // for tuned cells too.
+    { diameter: 400, infill: 'honeycomb', honeycomb: { orientation: 'tangential' } },
+    { diameter: 300, infill: 'honeycomb', segmentsOverride: 2, honeycomb: { orientation: 'tangential' } },
+    { diameter: 400, infill: 'honeycomb', honeycomb: { cellSize: 12, wall: 1.6 } },
+    { diameter: 400, infill: 'honeycomb', honeycomb: { cellSize: 30, wall: 8, orientation: 'tangential' } },
+    { diameter: 500, width: 60, infill: 'honeycomb', honeycomb: { cellSize: 6, maxCells: 120 }, printer: { x: 300, y: 300, z: 300, margin: 10 } },
   ];
   for (const input of cases) {
     const plan = planWheel(input);

@@ -1,7 +1,7 @@
 // Wheelwright UI — gathers params, replans live (same planner module the
 // server uses), drives the preview, and handles KCL/STL downloads.
 
-import { planWheel } from '/lib/wheel.js';
+import { planWheel, DEFAULTS, IN } from '/lib/wheel.js';
 import { generateKcl, slugFor } from '/lib/kclgen.js';
 import { createPreview } from './preview.js';
 
@@ -52,6 +52,14 @@ function gather() {
       boltHoleDia: $('boltHoleDia').value,
       pilotDia: $('pilotDia').value,
     },
+    honeycomb: {
+      cellSize: $('hcCellSize').value,
+      wall: $('hcWall').value,
+      orientation: $('hcOrientation').value,
+      cellShape: $('hcCellShape').value,
+      cornerRadius: $('hcCornerRadius').value,
+      maxCells: $('hcMaxCells').value,
+    },
     printer: {
       x: $('printerX').value,
       y: $('printerY').value,
@@ -63,6 +71,16 @@ function gather() {
     segmentsOverride: $('segmentsOverride').value,
   };
 }
+
+// Honeycomb tuning fields; `len` marks the ones that carry a length unit.
+const HC_FIELDS = {
+  cellSize: { id: 'hcCellSize', len: true },
+  wall: { id: 'hcWall', len: true },
+  orientation: { id: 'hcOrientation' },
+  cellShape: { id: 'hcCellShape' },
+  cornerRadius: { id: 'hcCornerRadius', len: true },
+  maxCells: { id: 'hcMaxCells' },
+};
 
 function applyPreset(p) {
   const flat = {
@@ -77,14 +95,29 @@ function applyPreset(p) {
     boltCircle: 'boltCircle', boltHoleDia: 'boltHoleDia', pilotDia: 'pilotDia',
   };
   for (const [k, id] of Object.entries(boreMap)) if (p.bore[k] !== undefined) $(id).value = p.bore[k];
+  // Honeycomb tuning falls back to the planner defaults (which are mm, so
+  // they convert when the preset works in inches).
+  for (const [k, f] of Object.entries(HC_FIELDS)) {
+    const preset = p.honeycomb?.[k];
+    if (preset !== undefined) {
+      $(f.id).value = preset;
+      continue;
+    }
+    const d = DEFAULTS.honeycomb[k];
+    $(f.id).value = f.len && p.units === 'in' ? Math.round((d / IN) * 1000) / 1000 : d;
+  }
   updateVisibility();
   replan();
 }
 
 function updateVisibility() {
+  // "field:a,b" — or several such conditions joined by ";", all must hold.
   document.querySelectorAll('[data-show]').forEach((el) => {
-    const [field, vals] = el.dataset.show.split(':');
-    el.classList.toggle('hidden', !vals.split(',').includes($(field).value));
+    const show = el.dataset.show.split(';').every((cond) => {
+      const [field, vals] = cond.split(':');
+      return vals.split(',').includes($(field).value);
+    });
+    el.classList.toggle('hidden', !show);
   });
 }
 
@@ -145,7 +178,9 @@ function renderOutput(plan) {
 
 function describeInfill(i) {
   if (i.style === 'spokes') return `${i.totalSpokes} spokes`;
-  if (i.style === 'honeycomb') return `honeycomb (${i.cellsPerSegment}/segment)`;
+  if (i.style === 'honeycomb') {
+    return `honeycomb — ${i.cellsPerSegment}/segment, ${i.cellAcrossFlats} mm ${i.cellShape} cells, ${i.wall} mm wall`;
+  }
   if (i.style === 'flexweb') return `flex web (${i.slotsTotal} slots)`;
   return 'solid';
 }

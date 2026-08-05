@@ -84,6 +84,22 @@
         </select>
       </label>
       <label data-show="infill:spokes">Spoke count (0 = auto) <input id="spokeCount" type="number" step="1" min="0" value="0" /></label>
+      <label data-show="infill:honeycomb">Cell size across flats (0 = auto) <input id="hcCellSize" type="number" step="any" min="0" value="0" /></label>
+      <label data-show="infill:honeycomb">Cell wall <input id="hcWall" type="number" step="any" value="2.6" /></label>
+      <label data-show="infill:honeycomb">Cell shape
+        <select id="hcCellShape">
+          <option value="hex">Hex</option>
+          <option value="round">Round</option>
+        </select>
+      </label>
+      <label data-show="infill:honeycomb;hcCellShape:hex">Corner radius (0 = sharp) <input id="hcCornerRadius" type="number" step="any" min="0" value="0" /></label>
+      <label data-show="infill:honeycomb">Cell orientation
+        <select id="hcOrientation">
+          <option value="radial">Point toward rim</option>
+          <option value="tangential">Flat toward rim</option>
+        </select>
+      </label>
+      <label data-show="infill:honeycomb">Max cells / segment <input id="hcMaxCells" type="number" step="1" min="8" max="240" value="64" /></label>
       <label>Tread
         <select id="tread">
           <option value="lugged">Lugged</option>

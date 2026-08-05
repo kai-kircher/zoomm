@@ -80,8 +80,9 @@ app.post('/api/export/stl', (req, res) => {
         e.code === 'no-token'
           ? 'Copy .env.example to .env and set ZOO_API_TOKEN (get one at https://zoo.dev/account/api-tokens), or paste a token in the Zoo settings panel (top right). ' +
             'Meanwhile: download the KCL zip and export with the Zoo CLI or Design Studio.'
-          : 'To enable one-click STL export, install the Zoo CLI (https://zoo.dev/docs/developer-tools/cli) on the server — or point ZOO_CLI_PATH in .env at the binary, or drop it in ./bin/. ' +
-            'Meanwhile: download the KCL zip and run `zoo kcl export --output-format=stl piece-A.kcl .` locally, or open the .kcl files in Zoo Design Studio and export there.',
+          : 'To enable one-click STL export, run `npm run setup:zoo` in the project (downloads the Zoo CLI into ./bin), then restart the server. ' +
+            'Alternatively install the CLI yourself (https://zoo.dev/docs/developer-tools/cli) or point ZOO_CLI_PATH in .env at the binary. ' +
+            'Meanwhile: download the KCL zip and open the .kcl files in Zoo Design Studio to export there.',
     });
   }
 });
@@ -91,6 +92,6 @@ app.listen(port, () => {
   const z = zooStatus();
   console.log(`Wheelwright listening on http://localhost:${port}`);
   console.log(
-    `Zoo CLI: ${z.cli ? `found (${z.cliVersion})` : 'not found'} | token: ${z.token ? 'set' : 'not set (.env or browser)'} → STL export ${z.ready ? 'ENABLED' : 'disabled (KCL download still works)'}`
+    `Zoo CLI: ${z.cli ? `found (${z.cliVersion})` : 'not found — run: npm run setup:zoo'} | token: ${z.token ? 'set' : 'not set (.env or browser)'} → STL export ${z.ready ? 'ENABLED' : 'disabled (KCL download still works)'}`
   );
 });

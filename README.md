@@ -38,10 +38,10 @@ npm install
 npm start          # http://localhost:3000
 ```
 
-Optional, for one-click STL export from the UI — install the
-[Zoo CLI](https://zoo.dev/docs/developer-tools/cli) and provide a token either way:
+Optional, for one-click STL export from the UI — two steps:
 
 ```sh
+npm run setup:zoo       # downloads the Zoo CLI for your platform into ./bin
 cp .env.example .env    # then set ZOO_API_TOKEN (https://zoo.dev/account/api-tokens)
 npm start
 ```
@@ -175,6 +175,7 @@ src/lib/kclgen.js       KCL emitter + assembly guide generator
 src/lib/zoo.js          zoo CLI wrapper for KCL → STL
 src/lib/zip.js          dependency-free ZIP writer
 public/                 UI (vanilla JS + vendored three.js, 2D canvas fallback)
+scripts/setup-zoo.mjs   downloads the Zoo CLI for your platform into ./bin
 scripts/validate-kcl.js engine round-trip validation for a config matrix
 test/                   node:test suite
 ```

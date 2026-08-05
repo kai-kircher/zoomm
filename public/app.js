@@ -260,12 +260,13 @@ function renderHealth(h) {
     }
     items = [
       [z.token, z.token ? `API token configured${getStoredToken() ? ' (from this browser)' : ''}` : 'API token missing'],
-      [z.cli, z.cli ? `zoo CLI found${z.cliVersion ? ` (${z.cliVersion})` : ''}` : 'zoo CLI not found on server'],
+      [z.cli, z.cli ? `zoo CLI found${z.cliVersion ? ` (${z.cliVersion})` : ''}` : 'zoo CLI not installed — run this in the project, then restart the server:'],
     ];
   }
   $('healthList').innerHTML = items
     .map(([ok, text]) => `<li><span class="dot ${ok ? 'ok' : ''}"></span>${text}</li>`)
     .join('');
+  $('cliHint').classList.toggle('hidden', !h || h.zoo.cli);
 }
 
 function refreshHealth() {

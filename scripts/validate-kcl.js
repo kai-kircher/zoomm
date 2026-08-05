@@ -45,7 +45,7 @@ for (const [name, cfg] of CONFIGS) {
 }
 
 if (!status.ready) {
-  console.log('\nKCL written. To validate against the engine: install the Zoo CLI, set ZOO_API_TOKEN, and re-run.');
+  console.log('\nKCL written. To validate against the engine: `npm run setup:zoo`, set ZOO_API_TOKEN in .env, and re-run.');
 } else if (failures) {
   process.exit(1);
 } else {

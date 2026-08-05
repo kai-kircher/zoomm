@@ -9,21 +9,20 @@ const angleOf = (p, c) => Math.atan2(p[1] - c[1], p[0] - c[0]);
 const unwrapCCW = (a0, a1) => (a1 <= a0 ? a1 + TAU * Math.ceil((a0 - a1) / TAU + 1e-9) : a1);
 const unwrapCW = (a0, a1) => (a1 >= a0 ? a1 - TAU * Math.ceil((a1 - a0) / TAU + 1e-9) : a1);
 
-// Split cutters into face holes (full-depth, interior) vs overlays (tread).
-function classifyCutters(cutters) {
+// Split cutters into the bore family (bore + keyway, hugging the piece
+// origin), face holes (full-depth, interior) and overlays (tread).
+export function classifyCutters(cutters) {
+  const boreFamily = [];
   const holes = [];
   const grooves = [];
   const lugs = [];
-  let boreCircle = null;
-  let keyway = null;
   for (const c of cutters) {
     if (c.shape === 'annulus') grooves.push(c);
     else if (c.id.startsWith('lug')) lugs.push(c);
-    else if (c.id === 'bore' && c.shape === 'circle') boreCircle = c;
-    else if (c.id === 'keyway') keyway = c;
+    else if (c.id === 'bore' || c.id === 'keyway') boreFamily.push(c);
     else holes.push(c);
   }
-  return { holes, grooves, lugs, boreCircle, keyway };
+  return { boreFamily, holes, grooves, lugs };
 }
 
 // Build path commands for a cutter (shared by three.js Path and Path2D).
@@ -76,6 +75,150 @@ function traceKeyedBore(bore, keyway, emit) {
   emit.line(rb * Math.cos(start), rb * Math.sin(start));
 }
 
+// ---------------------------------------------------------------------------
+// True piece cross-section
+// ---------------------------------------------------------------------------
+// The planner's sector outline deliberately overshoots the bore: the wedge
+// tip reaches rInner (inside the bore) and the KCL bore/keyway cutters trim
+// it back (see wheel.js). Handing those cutters to a triangulator as holes
+// breaks once a hole loop crosses the outline — ExtrudeGeometry grows side
+// walls along the whole loop, which shows up as a phantom thin-walled
+// cylinder at every piece tip. The real part (KCL subtract) has no such
+// walls, so the preview must not either: every bore-family region is
+// star-shaped around the piece origin, so within the sector its true inner
+// boundary is the polar curve ρ(θ) = furthest bore boundary along the ray θ.
+// We fold that curve straight into the outline and drop the bore cutters
+// from the hole list. One-piece wheels keep the bore as a genuine interior
+// hole — there it never crosses the outline.
+
+const cross2 = (a, b) => a[0] * b[1] - a[1] * b[0];
+
+// Furthest intersection of the ray s·u (s > 0) with a polygon (0 = miss).
+function rayPolyExtent(u, pts) {
+  let best = 0;
+  for (let i = 0; i < pts.length; i++) {
+    const p = pts[i];
+    const q = pts[(i + 1) % pts.length];
+    const d = [q[0] - p[0], q[1] - p[1]];
+    const denom = cross2(u, d);
+    if (Math.abs(denom) < 1e-12) continue;
+    const s = cross2(p, d) / denom;
+    const t = -cross2(u, p) / denom;
+    if (s > best && t >= -1e-9 && t <= 1 + 1e-9) best = s;
+  }
+  return best;
+}
+
+// Boundary distance along u of a D-bore region (major arc + flat chord):
+// circle ∩ half-plane, i.e. the nearer of the arc radius and the flat's
+// line when the ray faces the flat.
+function rayDboreExtent(u, segs) {
+  let r = 0;
+  let flat = null;
+  for (const s of segs) {
+    if (s.kind === 'arc') r = s.radius;
+    else flat = s;
+  }
+  if (flat) {
+    const d = [flat.b[0] - flat.a[0], flat.b[1] - flat.a[1]];
+    const dd = d[0] * d[0] + d[1] * d[1] || 1;
+    const t = -(flat.a[0] * d[0] + flat.a[1] * d[1]) / dd;
+    const foot = [flat.a[0] + t * d[0], flat.a[1] + t * d[1]]; // ⊥ from origin
+    const off = Math.hypot(foot[0], foot[1]) || 1;
+    const cos = (u[0] * foot[0] + u[1] * foot[1]) / off;
+    if (cos > 1e-6) r = Math.min(r, off / cos);
+  }
+  return r;
+}
+
+// ρ(θ): furthest bore-family boundary along the ray θ (piece frame; bore
+// circles are always centered on the piece origin).
+function boreRho(boreFamily) {
+  return (theta) => {
+    const u = [Math.cos(theta), Math.sin(theta)];
+    let rho = 0;
+    for (const c of boreFamily) {
+      if (c.shape === 'circle') rho = Math.max(rho, c.r);
+      else if (c.shape === 'poly') rho = Math.max(rho, rayPolyExtent(u, c.pts));
+      else if (c.shape === 'path') rho = Math.max(rho, rayDboreExtent(u, c.segs));
+    }
+    return rho;
+  };
+}
+
+// Trace the true profile of a piece: the planner outline with the bore
+// region folded into the inner boundary. Returns true when the bore family
+// was consumed by the outline; false when the caller must render it as
+// interior holes instead (one-piece wheels).
+export function tracePieceProfile(plan, unique, emit) {
+  if (plan.outline.kind === 'circle') {
+    emit.move(plan.outline.r, 0);
+    emit.arc(0, 0, plan.outline.r, 0, TAU, true);
+    return false;
+  }
+  const { boreFamily } = classifyCutters(unique.cutters);
+  if (!boreFamily.length) {
+    traceSegs(plan.outline.segs, emit);
+    return true;
+  }
+  const rho = boreRho(boreFamily);
+  const rMin = plan.radii.rInner; // safety floor; ρ ≥ boreMinR > rInner
+  const A = d2r(plan.segAngle);
+  const src = plan.outline.segs;
+  // All but the planner's inner arc, with the two face ends pulled out of
+  // the bore onto ρ. The stitch points always land on the innermost
+  // straight face segments (bore < first dovetail).
+  const segs = src.slice(0, -1).map((s) => ({ ...s }));
+  segs[0].a = [Math.max(rho(0), rMin), 0];
+  const rA = Math.max(rho(A), rMin);
+  let prev = [rA * Math.cos(A), rA * Math.sin(A)];
+  segs[segs.length - 1].b = prev;
+  // Inner boundary: ρ(θ) sampled walking back from face A to face 0.
+  const steps = Math.max(64, Math.ceil(plan.segAngle / 0.25));
+  for (let i = 1; i <= steps; i++) {
+    const th = A * (1 - i / steps);
+    const r = Math.max(rho(th), rMin);
+    const p = [r * Math.cos(th), r * Math.sin(th)];
+    segs.push({ kind: 'line', a: prev, b: p });
+    prev = p;
+  }
+  traceSegs(segs, emit);
+  return true;
+}
+
+// Hole tracers for the bore family when it stays a real hole (N = 1).
+function boreHoleTracers(boreFamily) {
+  const boreCircle = boreFamily.find((c) => c.shape === 'circle' && c.id === 'bore');
+  const keyway = boreFamily.find((c) => c.id === 'keyway');
+  if (boreCircle) return [(e) => traceKeyedBore(boreCircle, keyway, e)];
+  return boreFamily.map((c) => (e) => traceCutter(c, e));
+}
+
+// Adapter: our emit interface onto a THREE.Shape / THREE.Path.
+export function shapeEmitter(target) {
+  return {
+    move: (x, y) => target.moveTo(x, y),
+    line: (x, y) => target.lineTo(x, y),
+    arc: (cx, cy, r, a0, a1, ccw) => target.absarc(cx, cy, r, a0, a1, !ccw),
+  };
+}
+
+// Full 2D profile (outline + interior holes) of a piece as a THREE.Shape —
+// shared by the 3D renderer and the geometry tests.
+export function buildPieceShape(THREE, plan, unique) {
+  const shape = new THREE.Shape();
+  const consumed = tracePieceProfile(plan, unique, shapeEmitter(shape));
+  const { boreFamily, holes } = classifyCutters(unique.cutters);
+  const addHole = (fn) => {
+    const p = new THREE.Path();
+    fn(shapeEmitter(p));
+    shape.holes.push(p);
+  };
+  if (!consumed && boreFamily.length) for (const tr of boreHoleTracers(boreFamily)) addHole(tr);
+  for (const h of holes) addHole((e) => traceCutter(h, e));
+  return shape;
+}
+
 export async function createPreview(canvas) {
   try {
     const [T, { OrbitControls }] = await Promise.all([
@@ -118,33 +261,9 @@ function create3D(canvas, { T: THREE, OrbitControls }) {
   let state = { plan: null, explode: 0.18, fitView: false, R: 100 };
   let groups = [];
 
-  function shapeEmitter(target) {
-    return {
-      move: (x, y) => target.moveTo(x, y),
-      line: (x, y) => target.lineTo(x, y),
-      arc: (cx, cy, r, a0, a1, ccw) => target.absarc(cx, cy, r, a0, a1, !ccw),
-    };
-  }
-
   function buildPieceGeometry(plan, unique) {
-    const shape = new THREE.Shape();
-    if (plan.outline.kind === 'circle') {
-      shape.absarc(0, 0, plan.outline.r, 0, TAU, false);
-    } else {
-      traceSegs(plan.outline.segs, shapeEmitter(shape));
-    }
-    const { holes, grooves, lugs, boreCircle, keyway } = classifyCutters(unique.cutters);
-    const addHole = (fn) => {
-      const p = new THREE.Path();
-      fn(shapeEmitter(p));
-      shape.holes.push(p);
-    };
-    if (boreCircle) addHole((e) => traceKeyedBore(boreCircle, keyway, e));
-    else if (keyway) addHole((e) => traceCutter(keyway, e));
-    for (const h of holes) {
-      if (h.id === 'bore' && h.shape === 'path') addHole((e) => traceCutter(h, e));
-      else addHole((e) => traceCutter(h, e));
-    }
+    const { grooves, lugs } = classifyCutters(unique.cutters);
+    const shape = buildPieceShape(THREE, plan, unique);
     const geo = new THREE.ExtrudeGeometry(shape, { depth: plan.W, bevelEnabled: false, curveSegments: 48 });
     return { geo, grooves, lugs };
   }
@@ -333,8 +452,7 @@ function create2D(canvas) {
         ctx.rotate(d2r(piece.k * plan.segAngle));
       }
       const outline = new Path2D();
-      if (plan.outline.kind === 'circle') outline.arc(0, 0, plan.outline.r, 0, TAU);
-      else traceSegs(plan.outline.segs, pathEmitter(outline));
+      const boreConsumed = tracePieceProfile(plan, u, pathEmitter(outline));
       outline.closePath();
       ctx.fillStyle = PIECE_COLORS[piece.k % PIECE_COLORS.length];
       ctx.fill(outline);
@@ -342,10 +460,9 @@ function create2D(canvas) {
       ctx.lineWidth = 1 / scale;
       ctx.stroke(outline);
 
-      const { holes, grooves, lugs, boreCircle, keyway } = classifyCutters(u.cutters);
+      const { boreFamily, holes, grooves, lugs } = classifyCutters(u.cutters);
       const hp = new Path2D();
-      if (boreCircle) traceKeyedBore(boreCircle, keyway, pathEmitter(hp));
-      else if (keyway) traceCutter(keyway, pathEmitter(hp));
+      if (!boreConsumed && boreFamily.length) for (const tr of boreHoleTracers(boreFamily)) tr(pathEmitter(hp));
       for (const c of holes) traceCutter(c, pathEmitter(hp));
       ctx.fillStyle = '#0d1117';
       ctx.fill(hp, 'evenodd');

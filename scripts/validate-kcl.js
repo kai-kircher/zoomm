@@ -7,9 +7,12 @@
 
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { loadEnv } from '../src/lib/env.js';
 import { planWheel } from '../src/lib/wheel.js';
 import { generateKcl, slugFor } from '../src/lib/kclgen.js';
 import { zooStatus, exportStl } from '../src/lib/zoo.js';
+
+loadEnv(process.cwd()); // seed ZOO_API_TOKEN from .env, like the server does
 
 const CONFIGS = [
   ['cart-14in-keyed', {}],

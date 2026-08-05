@@ -739,7 +739,9 @@ export function planWheel(input = {}) {
         cut.push({ id: 'bore', shape: 'circle', c: [0, 0], r: rnd(rbEff), ...zThrough });
       }
     } else {
-      cut.push({ id: 'bore', shape: 'circle', c: [0, 0], r: rnd(rbEff), ...zThrough });
+      // Bolt hubs centre on the pilot bore; bore.diameter is not used there.
+      const rCenter = b.type === 'bolt' ? b.pilotDia / 2 + clr : rbEff;
+      cut.push({ id: 'bore', shape: 'circle', c: [0, 0], r: rnd(rCenter), ...zThrough });
     }
     if (b.type === 'keyed') {
       const keyDir = N > 1 ? A / 2 : 90;

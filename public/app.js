@@ -5,6 +5,7 @@ import { planWheel, DEFAULTS } from '/lib/wheel.js';
 import { convertFormUnits, fromMm, isLengthInput } from '/lib/units.js';
 import { generateKcl, slugFor } from '/lib/kclgen.js';
 import { createPreview } from './preview.js';
+import { enableScrub } from './scrub.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -349,6 +350,7 @@ document.querySelectorAll('#config input, #config select').forEach((el) => {
     replan();
   });
 });
+enableScrub(document.querySelectorAll('#config input[type="number"]'));
 document.querySelectorAll('[data-preset]').forEach((btn) => {
   btn.addEventListener('click', () => applyPreset(PRESETS[btn.dataset.preset]));
 });

@@ -78,15 +78,28 @@ test('segmented bolt pieces never subtract the pilot bore', () => {
   assert.ok(!pieceB.includes('// cutter: bore'), 'no bore cutter emitted');
 });
 
-test('generated arcs always sweep CCW from start to end', () => {
-  const plan = planWheel({});
-  const files = generateKcl(plan);
-  const src = files[0].content;
-  for (const m of src.matchAll(/arc\(start = \[([-\d.]+), ([-\d.]+)\], end = \[([-\d.]+), ([-\d.]+)\], center = \[([-\d.]+), ([-\d.]+)\]\)/g)) {
-    const [sx, sy, ex, ey, cx, cy] = m.slice(1).map(Number);
-    const rs = Math.hypot(sx - cx, sy - cy);
-    const re = Math.hypot(ex - cx, ey - cy);
-    assert.ok(Math.abs(rs - re) < 0.01, 'arc endpoints equidistant from center');
+test('every emitted arc has endpoints equidistant from its center', () => {
+  // The engine builds no region from a loop whose arc endpoints disagree on
+  // radius, and reports it as a bad region query point — a message that names
+  // the wrong thing (docs/zoo-api-notes.md, WW-3). Measured on engine 0.2.186:
+  // 8e-4 mm of mismatch is rejected, 1e-4 mm is accepted. Fillet tangent points
+  // rounded independently drift by ~8e-4, so the emitter snaps them; this test
+  // is what keeps them snapped, across every config that emits arcs.
+  const TOL = 1e-4;
+  for (const [name, cfg] of CONFIGS) {
+    for (const f of generateKcl(planWheel(cfg))) {
+      if (f.kind !== 'kcl') continue;
+      let arcs = 0;
+      for (const m of f.content.matchAll(
+        /arc\(start = \[([-\d.]+), ([-\d.]+)\], end = \[([-\d.]+), ([-\d.]+)\], center = \[([-\d.]+), ([-\d.]+)\]\)/g
+      )) {
+        const [sx, sy, ex, ey, cx, cy] = m.slice(1).map(Number);
+        const delta = Math.abs(Math.hypot(sx - cx, sy - cy) - Math.hypot(ex - cx, ey - cy));
+        assert.ok(delta < TOL, `${name}/${f.name}: arc endpoints differ by ${delta.toExponential(2)} mm`);
+        arcs++;
+      }
+      assert.ok(arcs > 0 || !/arc\(/.test(f.content), 'arc regex kept up with the emitter');
+    }
   }
 });
 

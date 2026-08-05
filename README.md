@@ -13,11 +13,12 @@ and the glue-up instructions.
 
 ## What it does
 
-- **Configure the wheel**: diameter, width, material (PLA/PETG/ABS/TPU), web structure
-  (spokes / honeycomb / airless flex-web / solid), tread (lugged / ribbed / diamond / slick),
-  and hub interface (keyed shaft, plain, hex, D-bore, or bolt circle with pilot). The honeycomb
-  web tunes further — [cell size, wall, orientation, corner rounding and cell
-  budget](#tuning-the-honeycomb-web).
+- **Configure the wheel**: diameter, width, material (PLA/PETG/ABS/TPU), tread (lugged / ribbed /
+  diamond / slick), and hub interface (keyed shaft, plain, hex, D-bore, or bolt circle with pilot).
+- **Pick a web**: solid, spokes, or one of the four [airless patterns](#the-airless-webs) —
+  honeycomb, interlaced lattice, auxetic re-entrant, or voronoi. Each carries its own parameter
+  group (cell size, wall, orientation, corner rounding…) and each guarantees a minimum wall
+  everywhere, by construction.
 - **Give it your print envelope**: bed X/Y, height Z, edge margin.
 - **It plans the build**: picks the smallest segment count whose pieces fit the bed, sizes
   slide-together dovetails into the rim and hub rings, keeps structural webs clear of the seams,
@@ -59,7 +60,7 @@ download the KCL bundle and run `zoo kcl export --output-format=stl piece-A.kcl 
 export from Design Studio.
 
 ```sh
-npm test           # 51 unit tests: chunking math, joints, dedupe, piece profiles, honeycomb lattice, KCL well-formedness
+npm test           # 99 unit tests: chunking math, joints, dedupe, piece profiles, every web pattern's wall and overlap guarantees, KCL well-formedness
 npm run validate:kcl   # regenerates a config matrix; round-trips through Zoo's engine when a token is set
 ```
 
@@ -71,8 +72,9 @@ npm run validate:kcl   # regenerates a config matrix; round-trips through Zoo's 
                       ├─ segment-count solver (annular-sector bbox vs. usable bed, prefers
                       │  counts that make pieces identical for your hub's symmetry)
                       ├─ dovetail sizing (rim ring + hub ring; clearance per side)
-                      ├─ web layout (spokes / honeycomb cells / curved flex-web slots),
-                      │  kept clear of seam keep-outs so joints stay solid
+                      ├─ web layout (spokes, flex-web slots, or a honeycomb /
+                      │  lattice / auxetic / voronoi cell pattern), kept clear
+                      │  of seam keep-outs so joints stay solid
                       ├─ tread cutters (circumferential groove rings, axial lug slots —
                       │  pattern counts snap to multiples of N so seams land between features)
                       └─ per-piece hub features + signature dedupe (keyway/D-flat/bolt windows)
@@ -118,14 +120,55 @@ half-open hole.
 
 ![Bolt-circle caster, honeycomb web — four identical 90° segments, bolt holes clear of every seam](docs/screenshot-caster.png)
 
-Honeycomb cells sit on a true hex lattice aligned to the piece bisector, so neighbouring cells
-keep a uniform wall and never merge — within a piece or across a seam.
+The patterned webs cooperate: every cell is placed clear of the seam keep-outs and repeats per
+segment, so a web never costs you a unique piece and never leaves a joint half-cut.
 
-### Tuning the honeycomb web
+## The airless webs
 
-The honeycomb style has its own parameter group (`honeycomb`, shown in the sidebar when you pick
-that web style). Every knob is a property of the lattice itself, so the uniform-wall and
-never-overlap guarantees hold for any combination:
+Search "airless tire" and you get four looks: honeycomb, criss-crossing curved struts, chevron
+trusses, and the auxetic lattices out of the research papers — plus the organic voronoi webs the
+3D-printing crowd likes. Wheelwright models all of them. Pick a web style in the sidebar and its
+own parameter group appears; every length follows the units selector.
+
+| Style | The look | Knobs |
+|---|---|---|
+| `honeycomb` | Hex cells on a true hex lattice — the Polaris/Resilient NPT look. | [below](#honeycomb) |
+| `lattice` | Two mirrored families of struts crossing in an X, diamonds slung between them. One row degenerates to a chevron/V-truss. | [below](#interlaced-lattice) |
+| `auxetic` | Re-entrant bow-tie cells in a brick bond: the web pulls *inward* when you squeeze it. | [below](#auxetic-re-entrant) |
+| `voronoi` | Organic irregular cells from a seeded tessellation. | [below](#voronoi) |
+
+### How the curved ones are built
+
+Honeycomb is a straight lattice stamped onto an annulus. The other three curve with the wheel, and
+they all get there the same way — by unrolling the web band into a rectangle, drawing the pattern
+there in plain straight-line geometry, and mapping it back:
+
+```
+  Φ(θ, t) = polar(rWebIn + t·bandW, θ)      θ ∈ [0, A] degrees,  t ∈ [0, 1] across the band
+```
+
+Φ is injective on the strip and orientation-preserving, so **cells laid out disjoint in the chart
+come out disjoint on the wheel** — the same no-overlap guarantee the hex lattice gets for free,
+extended to patterns that bend. That matters: overlapping cells merge into open voids in the CAD
+and shred the preview's triangulation.
+
+What Φ *does* distort is distance — one degree of θ buys `r·π/180` mm of arc, more the further out
+you go — so every wall is converted to degrees at the innermost radius it touches, which makes the
+number you typed the **minimum** material anywhere along that wall. Two consequences worth knowing:
+
+- A leaning strut is thicker measured tangentially than it is across itself, so `strutWidth` is
+  taken as the **perpendicular** thickness and the lattice gives up `strutWidth / cos φ` of arc for
+  it. Fall out of that: the neck between the cells above and below a crossing works out to
+  `strutWidth / sin φ` — never the tighter of the two, so it never needs policing.
+- Curves are emitted as chords, and a chord falls *inside* the arc it replaces. On a cell's inner
+  boundary that eats into the wall, so the chord length is held under `√(8·r·sag)` and every wall
+  carries the leftover sag as an allowance.
+
+The tests measure all of it on the finished millimetre geometry — every pair of cells in 31
+configurations, checked for overlap, nesting, self-crossing loops, band containment, seam
+clearance, and the wall actually left between them.
+
+### Honeycomb
 
 | Option | Default | What it does |
 |---|---|---|
@@ -136,11 +179,55 @@ never-overlap guarantees hold for any combination:
 | `cornerRadius` | `0` (sharp) | Fillets the hex corners. Capped at half the across-flats width, where the cell becomes `round`. |
 | `maxCells` | `64` | Per-segment cell budget. Cells are grown until they fit it, keeping the KCL (and the boolean count) sane. |
 
-Sizes follow the units selector, like every other length. Ask for cells too small for the budget
-and the planner grows them and says so in the build notes; ask for cells too big for the web band
-and it leaves the web solid rather than half-cutting the rim.
+### Interlaced lattice
 
-### Adhesive guidance (the flexible-glue question)
+Two pencils of straight lines in the chart, `θ = c ± L·t`, crossing on `rows + 1` evenly spaced
+levels. The diamond centred on each crossing spans one strut pitch across and two levels up, and
+levels stagger by half a pitch. Two rows and up weave; one row leaves alternating triangles — a
+chevron truss.
+
+| Option | Default | What it does |
+|---|---|---|
+| `rows` | `0` (auto) | Diamond rows across the band; `1` gives the chevron/V-truss. Auto scales with the band width. |
+| `struts` | `0` (auto) | Struts per family around the whole wheel, snapped to a multiple of the segment count. Auto picks roughly square cells. |
+| `strutWidth` | `4` mm | Material between neighbouring cells, measured across the strut. |
+| `cornerRadius` | `1.5` mm | Fillets the cell corners — the sharp apexes of a flexing web are where it cracks. |
+
+### Auxetic (re-entrant)
+
+Hexagonal cells whose two waist vertices are pulled back *inside* the cell, so under load the ribs
+fold instead of stretching and the web draws inward as it is squeezed — a negative Poisson's ratio,
+which is why the pattern keeps turning up in airless-tire research. Cells sit on concentric rings,
+brick-staggered ring to ring, all sharing one angular pitch so the columns line up.
+
+| Option | Default | What it does |
+|---|---|---|
+| `rings` | `0` (auto) | Cell rings across the band. Auto aims at ~26 mm of band per ring. |
+| `cellSize` | `0` (auto) | Cell width at the ring's mid radius. Auto matches the ring height. Rings near the hub narrow their cells rather than turn into a few big lobes. |
+| `wall` | `3` mm | Material between neighbouring cells — exactly this radially, and this at the tightest point of every ring wall. |
+| `waist` | `0.45` | Waist width ÷ cell width. Lower pinches harder (more auxetic); `0.9` is nearly a plain hex. |
+| `cornerRadius` | `1.2` mm | Fillets the corners, waist included — a rounded waist bows into the wall, so the bow is capped at the slack that corner has. |
+
+### Voronoi
+
+A seeded tessellation of the unrolled band: jittered-grid seeds, two rounds of Lloyd relaxation to
+even them out without making them look machined, then every cell pulled back by half a wall. The
+pull-back is metric-aware per edge — both owners of a shared edge run the same numbers off the same
+edge, so the two half-walls add up exactly.
+
+| Option | Default | What it does |
+|---|---|---|
+| `cells` | `0` (auto) | Cells per segment. Auto sizes them to the band; the automatic count stops at 40, but you can ask for up to 120. |
+| `wall` | `3` mm | Material between neighbouring cells. |
+| `seed` | `1` | Same seed, same web. Nothing in the planner touches `Math.random()`, so a design is reproducible on the server and in the browser. |
+| `cornerRadius` | `1.2` mm | Fillets the cell corners. |
+
+Ask for cells too small for the budget and the planner grows them and says so in the build notes;
+ask for cells too big for the web band and it leaves the web solid rather than half-cutting the
+rim. Segmented wheels keep every cell clear of the seam keep-outs, so the joints stay solid — on a
+narrow wedge near the hub that can mean a ring or two is left solid, and the notes say which.
+
+## Adhesive guidance (the flexible-glue question)
 
 The app recommends per material, and bakes it into the generated `ASSEMBLY.md`:
 

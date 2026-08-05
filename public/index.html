@@ -49,6 +49,9 @@
         <button data-preset="cart">14″ cart wheel</button>
         <button data-preset="rover">Rover airless (TPU)</button>
         <button data-preset="caster">Bolt-on caster</button>
+        <button data-preset="interlaced">Interlaced airless</button>
+        <button data-preset="auxetic">Auxetic scooter</button>
+        <button data-preset="organic">Voronoi show wheel</button>
         <button data-preset="tiny">100 mm test</button>
       </div>
     </section>
@@ -79,7 +82,10 @@
         <select id="infill">
           <option value="spokes">Spokes</option>
           <option value="honeycomb">Honeycomb</option>
-          <option value="flexweb">Flex web (airless)</option>
+          <option value="flexweb">Flex web (curved spokes)</option>
+          <option value="lattice">Interlaced lattice</option>
+          <option value="auxetic">Auxetic (re-entrant)</option>
+          <option value="voronoi">Voronoi (organic)</option>
           <option value="solid">Solid</option>
         </select>
       </label>
@@ -100,6 +106,23 @@
         </select>
       </label>
       <label data-show="infill:honeycomb">Max cells / segment <input id="hcMaxCells" type="number" step="1" min="8" max="240" value="64" /></label>
+
+      <label data-show="infill:lattice">Diamond rows (0 = auto, 1 = chevron) <input id="ltRows" type="number" step="1" min="0" max="6" value="0" /></label>
+      <label data-show="infill:lattice">Struts per family (0 = auto) <input id="ltStruts" type="number" step="1" min="0" max="96" value="0" /></label>
+      <label data-show="infill:lattice">Strut width <input id="ltStrutWidth" type="number" step="any" value="4" /></label>
+      <label data-show="infill:lattice">Corner radius (0 = sharp) <input id="ltCornerRadius" type="number" step="any" min="0" value="1.5" /></label>
+
+      <label data-show="infill:auxetic">Cell rings (0 = auto) <input id="axRings" type="number" step="1" min="0" max="6" value="0" /></label>
+      <label data-show="infill:auxetic">Cell width (0 = auto) <input id="axCellSize" type="number" step="any" min="0" value="0" /></label>
+      <label data-show="infill:auxetic">Cell wall <input id="axWall" type="number" step="any" value="3" /></label>
+      <label data-show="infill:auxetic">Waist (0.1 deep – 0.9 shallow) <input id="axWaist" type="number" step="0.05" min="0.1" max="0.9" value="0.45" /></label>
+      <label data-show="infill:auxetic">Corner radius (0 = sharp) <input id="axCornerRadius" type="number" step="any" min="0" value="1.2" /></label>
+
+      <label data-show="infill:voronoi">Cells / segment (0 = auto) <input id="voCells" type="number" step="1" min="0" max="120" value="0" /></label>
+      <label data-show="infill:voronoi">Cell wall <input id="voWall" type="number" step="any" value="3" /></label>
+      <label data-show="infill:voronoi">Pattern seed <input id="voSeed" type="number" step="1" min="0" value="1" /></label>
+      <label data-show="infill:voronoi">Corner radius (0 = sharp) <input id="voCornerRadius" type="number" step="any" min="0" value="1.2" /></label>
+
       <label>Tread
         <select id="tread">
           <option value="lugged">Lugged</option>

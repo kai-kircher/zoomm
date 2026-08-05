@@ -280,6 +280,251 @@ test('honeycomb cells never overlap and stay inside the web band', () => {
   }
 });
 
+// --- chart-drawn webs: lattice, auxetic, voronoi ---------------------------
+//
+// All three are laid out in the unrolled web band and mapped back through
+// Φ(θ, t) = polar(rWebIn + t·bandW, θ). Φ is injective on the strip, so cells
+// that are disjoint in the chart stay disjoint on the wheel — but only the
+// finished millimetre geometry proves the walls survive the mapping, the
+// chording and the corner fillets. These tests measure the emitted loops.
+
+const CELL_PREFIX = { lattice: 'lat', auxetic: 'aux', voronoi: 'vor' };
+const cellsOf = (plan) => {
+  const pre = CELL_PREFIX[plan.infillInfo.style];
+  return pre ? plan.uniquePieces[0].cutters.filter((c) => c.id.startsWith(pre)) : [];
+};
+const loopOf = (cell) => cell.segs.map((s) => s.a);
+
+// Minimum distance between two segments.
+function segGap(p, q, a, b) {
+  const toSeg = (u, v, w) => {
+    const dx = w[0] - v[0];
+    const dy = w[1] - v[1];
+    const t = clamp01(((u[0] - v[0]) * dx + (u[1] - v[1]) * dy) / (dx * dx + dy * dy || 1));
+    return Math.hypot(u[0] - v[0] - t * dx, u[1] - v[1] - t * dy);
+  };
+  return Math.min(toSeg(p, a, b), toSeg(q, a, b), toSeg(a, p, q), toSeg(b, p, q));
+}
+const clamp01 = (v) => Math.min(1, Math.max(0, v));
+
+function segsCross(p, q, a, b) {
+  const side = (u, v, w) => Math.sign((v[0] - u[0]) * (w[1] - u[1]) - (v[1] - u[1]) * (w[0] - u[0]));
+  const [o1, o2, o3, o4] = [side(p, q, a), side(p, q, b), side(a, b, p), side(a, b, q)];
+  return o1 !== o2 && o3 !== o4 && o1 !== 0 && o2 !== 0 && o3 !== 0 && o4 !== 0;
+}
+
+function pointInLoop(pt, loop) {
+  let inside = false;
+  for (let i = 0, j = loop.length - 1; i < loop.length; j = i++) {
+    const a = loop[i];
+    const b = loop[j];
+    if (a[1] > pt[1] !== b[1] > pt[1] && pt[0] < ((b[0] - a[0]) * (pt[1] - a[1])) / (b[1] - a[1]) + a[0]) inside = !inside;
+  }
+  return inside;
+}
+
+const bbox = (loop) =>
+  loop.reduce((b, p) => [Math.min(b[0], p[0]), Math.min(b[1], p[1]), Math.max(b[2], p[0]), Math.max(b[3], p[1])], [
+    Infinity,
+    Infinity,
+    -Infinity,
+    -Infinity,
+  ]);
+
+// Every guarantee the chart webs make, measured on the emitted loops.
+function assertWebIsSound(plan, wall, label) {
+  const cells = cellsOf(plan);
+  assert.ok(cells.length > 0, `${label}: web produced cells`);
+  const A = (plan.segAngle * Math.PI) / 180;
+  const { rWebIn, rWebOut } = plan.radii;
+
+  for (const c of cells) {
+    const loop = loopOf(c);
+    assert.ok(loop.length >= 3, `${label}/${c.id}: loop is a real polygon`);
+    assert.ok(pointInLoop(c.interior, loop), `${label}/${c.id}: region seed lies inside its loop`);
+    for (const p of loop) {
+      const r = Math.hypot(p[0], p[1]);
+      assert.ok(r >= rWebIn - 0.02 && r <= rWebOut + 0.02, `${label}/${c.id}: stays in the web band (r=${r.toFixed(2)})`);
+      if (plan.N > 1) {
+        assert.ok(p[1] >= -0.02, `${label}/${c.id}: clears the θ=0 seam`);
+        assert.ok(Math.sin(A) * p[0] - Math.cos(A) * p[1] >= -0.02, `${label}/${c.id}: clears the far seam`);
+      }
+    }
+    // A self-intersecting loop is KCL the engine cannot region().
+    for (let i = 0; i < loop.length; i++) {
+      for (let j = i + 2; j < loop.length; j++) {
+        if (i === 0 && j === loop.length - 1) continue;
+        assert.ok(
+          !segsCross(loop[i], loop[(i + 1) % loop.length], loop[j], loop[(j + 1) % loop.length]),
+          `${label}/${c.id}: loop does not cross itself`
+        );
+      }
+    }
+  }
+
+  const boxes = cells.map((c) => bbox(loopOf(c)));
+  for (let i = 0; i < cells.length; i++) {
+    for (let j = i + 1; j < cells.length; j++) {
+      const [ax0, ay0, ax1, ay1] = boxes[i];
+      const [bx0, by0, bx1, by1] = boxes[j];
+      if (ax0 - bx1 > wall || bx0 - ax1 > wall || ay0 - by1 > wall || by0 - ay1 > wall) continue;
+      const P = loopOf(cells[i]);
+      const Q = loopOf(cells[j]);
+      assert.ok(!pointInLoop(P[0], Q) && !pointInLoop(Q[0], P), `${label}: ${cells[i].id} and ${cells[j].id} do not nest`);
+      let gap = Infinity;
+      for (let a = 0; a < P.length; a++) {
+        for (let b = 0; b < Q.length; b++) {
+          gap = Math.min(gap, segGap(P[a], P[(a + 1) % P.length], Q[b], Q[(b + 1) % Q.length]));
+        }
+      }
+      assert.ok(gap >= wall - 0.02, `${label}: ${cells[i].id}/${cells[j].id} leave ${gap.toFixed(2)} mm, need ${wall}`);
+    }
+  }
+  return cells;
+}
+
+const BIG_BED = { x: 300, y: 300, z: 300, margin: 10 };
+const WEB_CASES = [
+  ['lattice, defaults', 4, { infill: 'lattice' }],
+  ['lattice, chevron truss', 4, { infill: 'lattice', lattice: { rows: 1 } }],
+  ['lattice, six rows', 4, { infill: 'lattice', lattice: { rows: 6 } }],
+  ['lattice, fat struts', 8, { infill: 'lattice', lattice: { strutWidth: 8 } }],
+  ['lattice, sharp corners', 4, { infill: 'lattice', lattice: { cornerRadius: 0 } }],
+  ['lattice, absurd fillet', 4, { diameter: 400, infill: 'lattice', lattice: { cornerRadius: 40 }, printer: BIG_BED }],
+  ['lattice, dense struts', 4, { diameter: 400, infill: 'lattice', lattice: { struts: 24 }, printer: BIG_BED }],
+  ['lattice, one piece', 4, { diameter: 160, width: 45, infill: 'lattice', tread: 'slick', bore: { type: 'bolt' } }],
+  ['lattice, two segments', 4, { diameter: 300, infill: 'lattice', segmentsOverride: 2 }],
+  ['lattice, sixteen segments', 4, { diameter: 700, infill: 'lattice', segmentsOverride: 16 }],
+  ['auxetic, defaults', 3, { infill: 'auxetic' }],
+  ['auxetic, one ring', 3, { infill: 'auxetic', auxetic: { rings: 1 } }],
+  ['auxetic, six rings', 3, { infill: 'auxetic', auxetic: { rings: 6 } }],
+  ['auxetic, deep waist', 3, { infill: 'auxetic', auxetic: { waist: 0.1 } }],
+  ['auxetic, shallow waist', 3, { infill: 'auxetic', auxetic: { waist: 0.9 } }],
+  ['auxetic, thick wall', 6, { infill: 'auxetic', auxetic: { wall: 6 } }],
+  ['auxetic, sharp corners', 3, { infill: 'auxetic', auxetic: { cornerRadius: 0 } }],
+  ['auxetic, absurd fillet', 3, { infill: 'auxetic', auxetic: { cornerRadius: 40 } }],
+  ['auxetic, small cells', 3, { diameter: 400, infill: 'auxetic', auxetic: { cellSize: 10 }, printer: BIG_BED }],
+  ['auxetic, one piece', 3, { diameter: 160, width: 45, infill: 'auxetic', tread: 'slick', bore: { type: 'bolt' } }],
+  ['auxetic, sixteen segments', 3, { diameter: 700, infill: 'auxetic', segmentsOverride: 16 }],
+  ['voronoi, defaults', 3, { infill: 'voronoi' }],
+  ['voronoi, another seed', 3, { infill: 'voronoi', voronoi: { seed: 99 } }],
+  ['voronoi, few cells', 3, { infill: 'voronoi', voronoi: { cells: 8 } }],
+  ['voronoi, many cells', 3, { infill: 'voronoi', voronoi: { cells: 60 } }],
+  ['voronoi, thick wall', 6, { infill: 'voronoi', voronoi: { wall: 6 } }],
+  ['voronoi, sharp corners', 3, { infill: 'voronoi', voronoi: { cornerRadius: 0 } }],
+  ['voronoi, absurd fillet', 3, { infill: 'voronoi', voronoi: { cornerRadius: 40 } }],
+  ['voronoi, one piece', 3, { diameter: 160, width: 45, infill: 'voronoi', tread: 'slick', bore: { type: 'bolt' } }],
+  ['voronoi, two segments', 3, { diameter: 300, infill: 'voronoi', segmentsOverride: 2 }],
+  ['voronoi, sixteen segments', 3, { diameter: 700, infill: 'voronoi', segmentsOverride: 16 }],
+];
+
+for (const [label, wall, cfg] of WEB_CASES) {
+  test(`chart web holds its wall and never overlaps: ${label}`, () => {
+    const plan = planWheel(cfg);
+    assert.ok(CELL_PREFIX[plan.infillInfo.style], `${label} produced a ${plan.infillInfo.style} web`);
+    assertWebIsSound(plan, wall, label);
+  });
+}
+
+test('lattice: one row is a chevron truss, more rows weave', () => {
+  const base = { diameter: 300, width: 50, infill: 'lattice', tread: 'slick', segmentsOverride: 4 };
+  const chevron = planWheel({ ...base, lattice: { rows: 1 } });
+  const woven = planWheel({ ...base, lattice: { rows: 4 } });
+  assert.equal(chevron.infillInfo.rows, 1);
+  assert.equal(woven.infillInfo.rows, 4);
+  assert.ok(woven.infillInfo.cellsPerSegment > chevron.infillInfo.cellsPerSegment, 'more rows cut more voids');
+  // A chevron's voids are all half-diamonds cut off by the band, so every one
+  // of them touches the hub ring or the rim ring. A woven lattice has whole
+  // diamonds floating clear of both.
+  const touches = (plan) => {
+    // Cells stop half a strut short of each ring, so "on a ring" means within
+    // that inset.
+    const pad = plan.infillInfo.strutWidth / 2 + 0.5;
+    return cellsOf(plan).map((c) => {
+      const rs = loopOf(c).map((p) => Math.hypot(p[0], p[1]));
+      return Math.min(...rs) < plan.radii.rWebIn + pad || Math.max(...rs) > plan.radii.rWebOut - pad;
+    });
+  };
+  assert.ok(touches(chevron).every(Boolean), 'every chevron void lands on a ring');
+  assert.ok(touches(woven).some((t) => !t), 'a woven lattice floats diamonds between the rings');
+  // Struts lean further the more rows they cross.
+  assert.ok(woven.infillInfo.lean > chevron.infillInfo.lean);
+});
+
+test('lattice struts are the requested thickness measured across the strut', () => {
+  // Tangentially a leaning strut is wider than it is thick; the parameter is
+  // the thickness, so a steeper lattice must eat more arc to deliver it.
+  const shallow = planWheel({ diameter: 400, infill: 'lattice', lattice: { rows: 1, strutWidth: 5 }, printer: BIG_BED });
+  const steep = planWheel({ diameter: 400, infill: 'lattice', lattice: { rows: 5, strutWidth: 5 }, printer: BIG_BED });
+  assert.ok(steep.infillInfo.lean > shallow.infillInfo.lean);
+  for (const plan of [shallow, steep]) assertWebIsSound(plan, 5, `lean ${plan.infillInfo.lean}`);
+});
+
+test('auxetic cells are re-entrant: the waist pinches inside the cell edges', () => {
+  for (const waist of [0.25, 0.45, 0.7]) {
+    const plan = planWheel({ diameter: 400, width: 60, infill: 'auxetic', tread: 'slick', auxetic: { rings: 3, cellSize: 16, cornerRadius: 0, waist }, printer: BIG_BED });
+    assert.equal(plan.infillInfo.style, 'auxetic');
+    assert.equal(plan.infillInfo.waist, waist);
+    for (const c of cellsOf(plan)) {
+      const mid = Math.atan2(c.interior[1], c.interior[0]);
+      const rMid = Math.hypot(c.interior[0], c.interior[1]);
+      let edge = 0; // widest half-angle, at the cell's inner and outer edges
+      let neck = Infinity; // narrowest, at mid radius
+      for (const p of loopOf(c)) {
+        const off = Math.abs(Math.atan2(p[1], p[0]) - mid);
+        edge = Math.max(edge, off);
+        if (Math.abs(Math.hypot(p[0], p[1]) - rMid) < 0.05) neck = Math.min(neck, off);
+      }
+      assert.ok(neck < edge - 1e-6, 'the waist sits inside the cell edges — the cell is re-entrant');
+      assert.ok(Math.abs(neck / edge - waist) < 0.02, `waist ratio ${(neck / edge).toFixed(3)} tracks the ${waist} asked for`);
+    }
+  }
+});
+
+test('voronoi is reproducible from its seed and genuinely reseeds', () => {
+  const cfg = (seed) => ({ diameter: 400, width: 60, infill: 'voronoi', tread: 'slick', voronoi: { seed, cells: 18 }, printer: BIG_BED });
+  const a = planWheel(cfg(4));
+  const again = planWheel(cfg(4));
+  const other = planWheel(cfg(5));
+  const shape = (plan) => JSON.stringify(cellsOf(plan).map((c) => c.segs.map((s) => s.a)));
+  assert.equal(shape(a), shape(again), 'the same seed replans to the exact same web');
+  assert.notEqual(shape(a), shape(other), 'a different seed lays out a different web');
+  assert.equal(a.infillInfo.seed, 4);
+  // Organic, not a grid: cell areas should genuinely vary.
+  const areas = cellsOf(a).map((c) => {
+    const loop = loopOf(c);
+    let s = 0;
+    for (let i = 0; i < loop.length; i++) {
+      const p = loop[i];
+      const q = loop[(i + 1) % loop.length];
+      s += p[0] * q[1] - q[0] * p[1];
+    }
+    return Math.abs(s) / 2;
+  });
+  assert.ok(Math.max(...areas) > Math.min(...areas) * 1.3, 'cells are not all the same size');
+});
+
+test('every chart web repeats per segment, so pieces still dedupe', () => {
+  for (const infill of ['lattice', 'auxetic', 'voronoi']) {
+    // A plain bore has no hub features, so the web is the only thing that
+    // could make two pieces differ.
+    const plan = planWheel({ diameter: 400, width: 60, infill, tread: 'slick', bore: { type: 'plain', diameter: 20 } });
+    assert.ok(plan.N > 1, `${infill} case must be segmented`);
+    assert.equal(plan.uniquePieces.length, 1, `${infill}: every segment prints from one file`);
+    assert.equal(plan.uniquePieces[0].count, plan.N);
+  }
+});
+
+test('a web band too narrow for the pattern falls back to solid and says so', () => {
+  for (const infill of ['lattice', 'auxetic', 'voronoi']) {
+    // Big bolt circle + small wheel leaves almost nothing between hub and rim.
+    const plan = planWheel({ diameter: 150, width: 30, infill, tread: 'slick', bore: { type: 'bolt', boltCount: 4, boltCircle: 100, boltHoleDia: 6, pilotDia: 20 } });
+    assert.ok(plan.radii.rWebOut - plan.radii.rWebIn < 12, 'the repro really does squeeze the web band');
+    assert.equal(plan.infillInfo.style, 'solid', `${infill} gives up rather than half-cutting the rings`);
+    assert.ok(plan.notes.some((n) => /solid/i.test(n)), `${infill} explains itself in the build notes`);
+  }
+});
+
 // --- bolt holes vs segment seams -------------------------------------------
 
 // Reassemble the full wheel's bolt holes: every bolt cutter of every piece,

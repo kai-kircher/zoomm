@@ -23,6 +23,24 @@ const PRESETS = {
     tread: 'slick', treadDepth: 2,
     bore: { type: 'bolt', boltCount: 4, boltCircle: 60, boltHoleDia: 5.5, pilotDia: 12 },
   },
+  interlaced: {
+    units: 'mm', diameter: 260, width: 55, material: 'tpu', infill: 'lattice',
+    tread: 'ribbed', treadDepth: 3,
+    bore: { type: 'keyed', diameter: 20, keyWidth: 6, keyDepth: 2.8 },
+    lattice: { rows: 3, strutWidth: 4, cornerRadius: 2 },
+  },
+  auxetic: {
+    units: 'mm', diameter: 200, width: 40, material: 'tpu', infill: 'auxetic',
+    tread: 'lugged', treadDepth: 2.5,
+    bore: { type: 'hex', hexAcrossFlats: 13 },
+    auxetic: { rings: 2, wall: 2.6, waist: 0.4, cornerRadius: 1.2 },
+  },
+  organic: {
+    units: 'mm', diameter: 180, width: 40, material: 'petg', infill: 'voronoi',
+    tread: 'slick', treadDepth: 2,
+    bore: { type: 'bolt', boltCount: 5, boltCircle: 70, boltHoleDia: 5.5, pilotDia: 14 },
+    voronoi: { wall: 3, seed: 7, cornerRadius: 1.6 },
+  },
   tiny: {
     units: 'mm', diameter: 100, width: 25, material: 'pla', infill: 'spokes',
     tread: 'ribbed', treadDepth: 2,
@@ -52,14 +70,12 @@ function gather() {
       boltHoleDia: $('boltHoleDia').value,
       pilotDia: $('pilotDia').value,
     },
-    honeycomb: {
-      cellSize: $('hcCellSize').value,
-      wall: $('hcWall').value,
-      orientation: $('hcOrientation').value,
-      cellShape: $('hcCellShape').value,
-      cornerRadius: $('hcCornerRadius').value,
-      maxCells: $('hcMaxCells').value,
-    },
+    ...Object.fromEntries(
+      Object.entries(STYLE_FIELDS).map(([group, fields]) => [
+        group,
+        Object.fromEntries(Object.entries(fields).map(([k, f]) => [k, $(f.id).value])),
+      ])
+    ),
     printer: {
       x: $('printerX').value,
       y: $('printerY').value,
@@ -72,14 +88,36 @@ function gather() {
   };
 }
 
-// Honeycomb tuning fields; `len` marks the ones that carry a length unit.
-const HC_FIELDS = {
-  cellSize: { id: 'hcCellSize', len: true },
-  wall: { id: 'hcWall', len: true },
-  orientation: { id: 'hcOrientation' },
-  cellShape: { id: 'hcCellShape' },
-  cornerRadius: { id: 'hcCornerRadius', len: true },
-  maxCells: { id: 'hcMaxCells' },
+// Per-web-style tuning fields, keyed by the planner's parameter group.
+// `len` marks the ones that carry a length unit.
+const STYLE_FIELDS = {
+  honeycomb: {
+    cellSize: { id: 'hcCellSize', len: true },
+    wall: { id: 'hcWall', len: true },
+    orientation: { id: 'hcOrientation' },
+    cellShape: { id: 'hcCellShape' },
+    cornerRadius: { id: 'hcCornerRadius', len: true },
+    maxCells: { id: 'hcMaxCells' },
+  },
+  lattice: {
+    rows: { id: 'ltRows' },
+    struts: { id: 'ltStruts' },
+    strutWidth: { id: 'ltStrutWidth', len: true },
+    cornerRadius: { id: 'ltCornerRadius', len: true },
+  },
+  auxetic: {
+    rings: { id: 'axRings' },
+    cellSize: { id: 'axCellSize', len: true },
+    wall: { id: 'axWall', len: true },
+    waist: { id: 'axWaist' },
+    cornerRadius: { id: 'axCornerRadius', len: true },
+  },
+  voronoi: {
+    cells: { id: 'voCells' },
+    wall: { id: 'voWall', len: true },
+    seed: { id: 'voSeed' },
+    cornerRadius: { id: 'voCornerRadius', len: true },
+  },
 };
 
 function applyPreset(p) {
@@ -95,16 +133,18 @@ function applyPreset(p) {
     boltCircle: 'boltCircle', boltHoleDia: 'boltHoleDia', pilotDia: 'pilotDia',
   };
   for (const [k, id] of Object.entries(boreMap)) if (p.bore[k] !== undefined) $(id).value = p.bore[k];
-  // Honeycomb tuning falls back to the planner defaults (which are mm, so
+  // Web-style tuning falls back to the planner defaults (which are mm, so
   // they convert when the preset works in inches).
-  for (const [k, f] of Object.entries(HC_FIELDS)) {
-    const preset = p.honeycomb?.[k];
-    if (preset !== undefined) {
-      $(f.id).value = preset;
-      continue;
+  for (const [group, fields] of Object.entries(STYLE_FIELDS)) {
+    for (const [k, f] of Object.entries(fields)) {
+      const preset = p[group]?.[k];
+      if (preset !== undefined) {
+        $(f.id).value = preset;
+        continue;
+      }
+      const d = DEFAULTS[group][k];
+      $(f.id).value = f.len && p.units === 'in' ? Math.round((d / IN) * 1000) / 1000 : d;
     }
-    const d = DEFAULTS.honeycomb[k];
-    $(f.id).value = f.len && p.units === 'in' ? Math.round((d / IN) * 1000) / 1000 : d;
   }
   updateVisibility();
   replan();
@@ -182,6 +222,16 @@ function describeInfill(i) {
     return `honeycomb — ${i.cellsPerSegment}/segment, ${i.cellAcrossFlats} mm ${i.cellShape} cells, ${i.wall} mm wall`;
   }
   if (i.style === 'flexweb') return `flex web (${i.slotsTotal} slots)`;
+  if (i.style === 'lattice') {
+    const shape = i.rows === 1 ? 'chevron truss' : `${i.rows}-row weave`;
+    return `interlaced lattice — ${shape}, ${i.cellsPerSegment} voids/segment, ${i.strutWidth} mm struts`;
+  }
+  if (i.style === 'auxetic') {
+    return `auxetic — ${i.rings} ring${i.rings === 1 ? '' : 's'}, ${i.cellsPerSegment}/segment, ${i.cellWidth}×${i.cellHeight} mm cells, ${i.wall} mm wall`;
+  }
+  if (i.style === 'voronoi') {
+    return `voronoi — ${i.cellsPerSegment} cells/segment, ${i.wall} mm wall, seed ${i.seed}`;
+  }
   return 'solid';
 }
 function describeTread(t) {

@@ -140,6 +140,11 @@ function replan() {
   }, 120);
 }
 
+// The planner rounds everything it derives, but the params it echoes back are
+// raw — and the in → mm conversion leaves float noise on them (14in becomes
+// 355.59999999999997). Round to the 1 decimal the rest of the summary uses.
+const mm1 = (v) => Math.round(v * 10) / 10;
+
 function renderOutput(plan) {
   const p = plan.params;
   const segTxt = plan.N === 1
@@ -149,7 +154,7 @@ function renderOutput(plan) {
     ? ''
     : `<div class="kv"><span>Joints per seam</span><span>${plan.joints.length} dovetail${plan.joints.length === 1 ? '' : 's'} (${plan.joints.map((j) => j.tag).join(', ')})</span></div>`;
   $('summary').innerHTML = `
-    <div class="big">Ø${p.diameter} × ${p.width} mm — ${segTxt}</div>
+    <div class="big">Ø${mm1(p.diameter)} × ${mm1(p.width)} mm — ${segTxt}</div>
     <div class="kv"><span>Piece footprint</span><span>${plan.bbox.w} × ${plan.bbox.d} × ${plan.W} mm</span></div>
     <div class="kv"><span>Usable bed</span><span>${plan.fit.usable.x} × ${plan.fit.usable.y} × ${plan.fit.usable.z} mm</span></div>
     ${jointTxt}

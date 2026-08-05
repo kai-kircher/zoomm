@@ -67,6 +67,17 @@ button.pill { cursor: pointer; }
 .health-list .dot { width: 7px; height: 7px; border-radius: 99px; background: var(--warn); flex: none; }
 .health-list .dot.ok { background: var(--good); }
 .token-panel .hint { margin: 8px 0; }
+.cli-hint {
+  font: 12px ui-monospace, monospace;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 9px;
+  margin: 4px 0 8px;
+}
+.cli-hint.hidden { display: none; }
+.cli-hint::before { content: '$ '; color: var(--dim); }
 .token-panel code { color: var(--text); background: var(--panel); padding: 0 4px; border-radius: 4px; }
 .token-panel input {
   width: 100%;

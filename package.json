@@ -6,6 +6,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
+    "setup:zoo": "node scripts/setup-zoo.mjs",
     "test": "node --test",
     "validate:kcl": "node scripts/validate-kcl.js"
   },

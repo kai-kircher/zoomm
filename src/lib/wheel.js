@@ -651,7 +651,7 @@ export function planWheel(input = {}) {
   const wholeFits = p.diameter <= ux && p.diameter <= uy;
 
   const segBBox = (N) => {
-    if (N === 1) return { w: p.diameter, d: p.diameter };
+    if (N === 1) return { w: rnd(p.diameter, 1), d: rnd(p.diameter, 1) };
     const alpha = Math.PI / N;
     const w = 2 * (R * Math.sin(alpha) + jointOut);
     const d = R - rInner * Math.cos(alpha) + jointOut;

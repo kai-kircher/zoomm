@@ -124,7 +124,7 @@ test('D-bore: pieces facing the flat bottom out at the flat offset', () => {
   assert.ok(sawFlat, 'some piece contains the deepest point of the flat');
 });
 
-test('bolt hub: pilot bore folds into the outline, bolt holes stay holes', () => {
+test('bolt hub: pilot bore is carved into the outline, bolt holes stay holes', () => {
   const plan = planWheel({ bore: { type: 'bolt' } });
   assert.ok(plan.N > 1);
   let boltHoles = 0;
@@ -133,7 +133,7 @@ test('bolt hub: pilot bore folds into the outline, bolt holes stay holes', () =>
     assert.ok(Math.abs(minR - 6.2) < 0.05, `pilot radius ${minR.toFixed(3)} ≈ 6.2`);
     const { holes, boreFamily } = classifyCutters(u.cutters);
     boltHoles += holes.filter((c) => c.id.startsWith('bolt')).length;
-    assert.equal(boreFamily.length, 1, 'only the pilot circle belongs to the bore family');
+    assert.equal(boreFamily.length, 0, 'segmented pilot bores live in the profile, not in a cutter');
     assertMeshHasNoPhantom(plan, u);
   }
   assert.ok(boltHoles > 0, 'bolt holes remain interior holes on the pieces that carry them');

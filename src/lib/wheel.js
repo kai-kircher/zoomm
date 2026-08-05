@@ -234,6 +234,11 @@ export function planWheel(input = {}) {
   // Segment wedges extend inward past the bore boundary; the bore cutter
   // erases the tips, leaving the exact bore shape in the assembled hub.
   const rInner = Math.max(0.8, Math.min(Math.max(1.2, boreMinR - 1), boreMinR - 0.15));
+  // Round bore families (plain bore, bolt pilot) skip that trick on
+  // segmented wheels: their bore boundary inside a wedge is just an arc, so
+  // it is carved straight into the piece profile and no bore cutter is
+  // emitted — the Zoo engine rejects the tip-trim subtract for these.
+  const roundBore = b.type === 'plain' || b.type === 'bolt';
 
   const hubWall = clamp(boreMaxR * 0.4, 5, 12);
   let rHub = Math.max(boreMaxR + hubWall, R * 0.13, 16);
@@ -493,7 +498,8 @@ export function planWheel(input = {}) {
     const segs = [];
     const asc = [...joints];
     const desc = [...joints].reverse();
-    let P = [rInner, 0];
+    const rTip = roundBore ? boreMaxR : rInner; // round bores: profile ends on the bore arc
+    let P = [rTip, 0];
     // Face 0 (female pockets), walking outward along the +X axis.
     for (const j of asc) {
       const hn = j.hn + jc;
@@ -532,9 +538,9 @@ export function planWheel(input = {}) {
       segs.push({ kind: 'line', a: ph1, b: pn1 });
       P = pn1;
     }
-    segs.push({ kind: 'line', a: P, b: polar(rInner, A) });
+    segs.push({ kind: 'line', a: P, b: polar(rTip, A) });
     // Inner arc, drawn A → 0 (clockwise as walked).
-    segs.push({ kind: 'arc', a: polar(rInner, A), b: [rInner, 0], center: [0, 0], radius: rInner, ccw: false });
+    segs.push({ kind: 'arc', a: polar(rTip, A), b: [rTip, 0], center: [0, 0], radius: rTip, ccw: false });
     outline = { kind: 'sector', segs, interior: polar((rHub + R) / 2, A / 2) };
   }
 
@@ -812,8 +818,9 @@ export function planWheel(input = {}) {
       } else {
         cut.push({ id: 'bore', shape: 'circle', c: [0, 0], r: rnd(rbEff), ...zThrough });
       }
-    } else {
+    } else if (N === 1 || !roundBore) {
       // Bolt hubs centre on the pilot bore; bore.diameter is not used there.
+      // Segmented round bores emit no cutter — the profile ends on the bore arc.
       const rCenter = b.type === 'bolt' ? b.pilotDia / 2 + clr : rbEff;
       cut.push({ id: 'bore', shape: 'circle', c: [0, 0], r: rnd(rCenter), ...zThrough });
     }

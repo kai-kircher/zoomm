@@ -98,9 +98,10 @@ last. Dovetails resist the circumferential separation; axial retention comes fro
 each piece's 2D outline, the generated KCL needs nothing beyond sketches, regions, extrudes and
 subtracts — the most battle-tested ops in the engine.
 
-The wedges extend inward past the bore line and the bore tool (round, keyed, hex, D, or pilot +
-bolt circle) is subtracted per piece, so the assembled hub carries the exact mating feature with
-your chosen fit clearance.
+For shaped bores (keyed, hex, D) the wedges extend inward past the bore line and the bore tool
+is subtracted per piece, so the assembled hub carries the exact mating feature with your chosen
+fit clearance. Round bores (plain, bolt-circle pilot) carve their bore arc directly into each
+piece's profile instead — same assembled hub, one less boolean for the engine.
 
 ### Why the pieces come out identical
 

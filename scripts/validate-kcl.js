@@ -21,6 +21,10 @@ const CONFIGS = [
   ['caster-bolt-honeycomb', { diameter: 160, width: 45, infill: 'honeycomb', tread: 'slick', bore: { type: 'bolt', boltCount: 4, boltCircle: 60, boltHoleDia: 5.5, pilotDia: 12 } }],
   ['wagon-bolt-segmented', { diameter: 355.6, bore: { type: 'bolt', boltCount: 4, boltCircle: 60, boltHoleDia: 5.5, pilotDia: 12 } }],
   ['dbore-diamond-solid', { diameter: 200, width: 45, infill: 'solid', tread: 'diamond', bore: { type: 'dbore', diameter: 12 } }],
+  // Segmented bolt hub (N=8 at the default diameter): the pilot bore must be
+  // carried by the sector outline — the engine rejects the old tip-trim
+  // subtract of the concentric pilot circle over the wedge tip.
+  ['cart-bolt-segmented', { bore: { type: 'bolt' }, infill: 'solid', tread: 'slick' }],
 ];
 
 const outRoot = join(process.cwd(), 'out', 'validate');

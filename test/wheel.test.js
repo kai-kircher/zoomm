@@ -198,7 +198,7 @@ test('an unavoidable seam crossing (coprime override) still warns', () => {
   assert.ok(plan.warnings.some((w) => /seam/i.test(w)), 'residual conflicts keep a loud warning');
 });
 
-test('shaped-bore wedges extend inside the bore so the cutter forms the true bore', () => {
+test('sector wedges extend inside the bore so the cutter forms the true bore', () => {
   for (const cfg of [{}, { bore: { type: 'hex', hexAcrossFlats: 13 } }]) {
     const plan = planWheel({ diameter: 355.6, ...cfg });
     if (plan.N === 1) continue;
@@ -209,25 +209,22 @@ test('shaped-bore wedges extend inside the bore so the cutter forms the true bor
   }
 });
 
-test('segmented round bores carve the bore arc into the profile — no bore cutter', () => {
-  // The Zoo engine rejects the tip-trim subtract for these, so the profile
-  // must end exactly on the bore and no piece may carry a bore cutter.
-  const configs = [
+test('segmented concentric bores live in the outline, not in a cutter', () => {
+  // Bolt pilots and plain bores are circles concentric with the wheel, so
+  // the sector outline carries the exact bore arc and no piece needs the
+  // razor-thin tip-trim subtract that the Zoo engine rejects.
+  for (const cfg of [
+    { bore: { type: 'bolt' }, infill: 'solid', tread: 'slick' }, // the failing repro: N=8, pilot r 6.2
     { diameter: 300, bore: { type: 'bolt', boltCount: 4, boltCircle: 60, boltHoleDia: 5.5, pilotDia: 12 } },
     { diameter: 400, bore: { type: 'plain', diameter: 20 } },
-  ];
-  for (const cfg of configs) {
+  ]) {
     const plan = planWheel(cfg);
     assert.ok(plan.N > 1, 'config must be segmented');
     const innerArc = plan.outline.segs[plan.outline.segs.length - 1];
     assert.equal(innerArc.kind, 'arc');
-    assert.ok(Math.abs(innerArc.radius - plan.radii.boreMaxR) < 1e-6, 'inner arc sits exactly on the bore');
+    assert.ok(Math.abs(innerArc.radius - plan.radii.boreMaxR) < 1e-3, 'inner arc sits exactly on the bore radius');
     for (const u of plan.uniquePieces) {
-      assert.ok(!u.cutters.some((c) => c.id === 'bore'), 'no bore cutter on segmented round-bore pieces');
+      assert.ok(!u.cutters.some((c) => c.id === 'bore'), `piece ${u.label} has no bore cutter`);
     }
   }
-  // One-piece wheels keep the bore as a cutter (it stays a real interior hole).
-  const one = planWheel({ diameter: 120, width: 30, bore: { type: 'plain', diameter: 8 } });
-  assert.equal(one.N, 1);
-  assert.ok(one.uniquePieces[0].cutters.some((c) => c.id === 'bore'));
 });

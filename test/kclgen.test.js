@@ -10,6 +10,7 @@ const CONFIGS = [
   ['flexweb hex', { diameter: 260, width: 60, material: 'tpu', infill: 'flexweb', tread: 'slick', bore: { type: 'hex', hexAcrossFlats: 13 } }],
   ['honeycomb bolt diamond', { diameter: 400, width: 70, infill: 'honeycomb', tread: 'diamond', bore: { type: 'bolt', boltCount: 6, boltCircle: 80, boltHoleDia: 6, pilotDia: 15 } }],
   ['dbore ribbed solid', { diameter: 200, width: 45, infill: 'solid', tread: 'ribbed', bore: { type: 'dbore', diameter: 12 } }],
+  ['segmented bolt solid slick', { bore: { type: 'bolt' }, infill: 'solid', tread: 'slick' }],
 ];
 
 for (const [name, cfg] of CONFIGS) {
@@ -51,6 +52,25 @@ for (const [name, cfg] of CONFIGS) {
     assert.equal(parsed.pieces.length, plan.uniquePieces.length);
   });
 }
+
+test('segmented bolt pieces never subtract the pilot bore', () => {
+  // The concentric pilot circle used to be a tip-trim cutter; the Zoo engine
+  // rejects that razor-thin subtraction ("cannot handle this 3D subtraction
+  // yet"), so the bore arc is part of the outline and piece A — which has no
+  // bolt hole — needs no boolean at all.
+  const plan = planWheel({ bore: { type: 'bolt' }, infill: 'solid', tread: 'slick' });
+  assert.ok(plan.N > 1, 'repro config must be segmented');
+  const files = generateKcl(plan);
+  const pieceA = files.find((f) => f.name === 'piece-A.kcl').content;
+  assert.match(pieceA, /arc\(start = \[6\.2, 0\]/, 'inner arc sits on the pilot radius');
+  assert.ok(!pieceA.includes('subtract('), 'piece A has no subtract');
+  assert.match(pieceA, /\npiece = blank\n/);
+  const pieceB = files.find((f) => f.name === 'piece-B.kcl').content;
+  const subs = [...pieceB.matchAll(/subtract\(\[\w+\], tools = \[([^\]]*)\]\)/g)];
+  assert.equal(subs.length, 1, 'piece B has exactly one subtract');
+  assert.equal(subs[0][1].split(',').length, 1, 'piece B subtracts only its bolt hole');
+  assert.ok(!pieceB.includes('// cutter: bore'), 'no bore cutter emitted');
+});
 
 test('generated arcs always sweep CCW from start to end', () => {
   const plan = planWheel({});

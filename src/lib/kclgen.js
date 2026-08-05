@@ -19,9 +19,45 @@ function fmt(v) {
 }
 const pt = ([x, y]) => `[${fmt(x)}, ${fmt(y)}]`;
 
+// An arc's two endpoints must be the same distance from its center, or the
+// engine cannot build a region from the loop — and says so by blaming the
+// region's query point ("Unable to create a region that contains the requested
+// query point"), which points at the wrong thing entirely. Fillet tangent
+// points computed and rounded independently drift apart by ~1e-3 mm, which is
+// enough. So endpoints are projected onto the mean radius before emitting, and
+// the neighbouring entity that shares each endpoint is moved with it, keeping
+// the loop chained. Measured on engine 0.2.186: 8e-4 mm of mismatch is
+// rejected, 1e-4 is accepted (see docs/zoo-api-notes.md, WW-3).
+function snapArcEndpoints(segs) {
+  const out = segs.map((s) => ({ ...s, a: [...s.a], b: [...s.b] }));
+  const dist = (p, c) => Math.hypot(p[0] - c[0], p[1] - c[1]);
+  const onto = (p, c, r) => {
+    const d = dist(p, c);
+    return d < 1e-12 ? p : [c[0] + ((p[0] - c[0]) * r) / d, c[1] + ((p[1] - c[1]) * r) / d];
+  };
+  const near = (p, q) => Math.hypot(p[0] - q[0], p[1] - q[1]) < 1e-6;
+  out.forEach((s, i) => {
+    if (s.kind !== 'arc') return;
+    const c = s.center;
+    const r = (dist(s.a, c) + dist(s.b, c)) / 2;
+    const a = onto(s.a, c, r);
+    const b = onto(s.b, c, r);
+    for (const n of [out[(i + out.length - 1) % out.length], out[(i + 1) % out.length]]) {
+      if (n === s) continue;
+      for (const end of ['a', 'b']) {
+        if (near(n[end], s.a)) n[end] = a;
+        else if (near(n[end], s.b)) n[end] = b;
+      }
+    }
+    s.a = a;
+    s.b = b;
+  });
+  return out;
+}
+
 function emitPathEntities(segs, indent = '  ') {
   const lines = [];
-  segs.forEach((s, i) => {
+  snapArcEndpoints(segs).forEach((s, i) => {
     const name = `e${i + 1}`;
     if (s.kind === 'line') {
       lines.push(`${indent}${name} = line(start = ${pt(s.a)}, end = ${pt(s.b)})`);

@@ -60,9 +60,18 @@ download the KCL bundle and run `zoo kcl export --output-format=stl piece-A.kcl 
 export from Design Studio.
 
 ```sh
-npm test           # 99 unit tests: chunking math, joints, dedupe, piece profiles, every web pattern's wall and overlap guarantees, KCL well-formedness
-npm run validate:kcl   # regenerates a config matrix; round-trips through Zoo's engine when a token is set
+npm test           # 105 unit tests: chunking math, joints, dedupe, piece profiles, every web pattern's wall and overlap guarantees, KCL well-formedness
+npm run validate:kcl   # regenerates a 13-config matrix; round-trips through Zoo's engine when a token is set
 ```
+
+## Documentation
+
+| Doc | What's in it |
+|---|---|
+| [User guide](docs/user-guide.md) | Install, every control, reading the build plan, six worked use-cases, printing and glue-up, troubleshooting. |
+| [Architecture](docs/architecture.md) | The planner's geometry: band model, segment solver, dedupe, the chart the curved webs are drawn in, KCL emission rules, testing strategy. |
+| [HTTP API](docs/api.md) | `/api/plan`, `/api/kcl`, `/api/kcl.zip`, `/api/export/stl`, the parameter object, error codes. |
+| [Zoo platform field notes](docs/zoo-api-notes.md) | Bug reports, friction and suggestions for Zoo's APIs — with minimal repros, measured timings, and the workaround shipped for each. |
 
 ## How it works
 
@@ -267,7 +276,9 @@ piece = subtract([blank], tools = [cut1, cut2, ...])
 ```
 
 Cutters overshoot the part in Z, boolean tool batches are bounded, and arcs are emitted
-start/end/center in CCW order per the KCL spec.
+start/end/center in CCW order per the KCL spec — with their endpoints snapped onto a common
+radius, because an arc whose endpoints disagree by a micron is rejected by the engine as a bad
+*region query point* ([WW-3](docs/zoo-api-notes.md#ww-3--a-1-µm-arc-inconsistency-is-reported-as-a-bad-region-query-point)).
 
 ## API
 
@@ -309,6 +320,13 @@ test/                   node:test suite
 - Tread/tenon edges are sharp (no chamfered lead-ins yet); slicers' seam-aware placement and a
   light file fix the first-fit experience.
 - Preview approximates tread visually; the KCL carries the exact cuts.
+- **Engine export is not yet reliable enough to be the only route.** In a 13-configuration
+  live run on engine 0.2.186 (2026-08-05), 5 configs exported, 3 hung with no output until our
+  300 s timeout, and 5 returned engine errors — one of which was ours and is now fixed. Runtime
+  doesn't track model size either: we measured a 12-entity file at 417 s and a 69-cutter wheel
+  at 85 s. Every measurement, repro and suggested fix is in
+  [docs/zoo-api-notes.md](docs/zoo-api-notes.md); the KCL download and Design Studio remain the
+  dependable path, which is why they're first-class in the UI.
 - Wishlist: Text-to-CAD hub-cap emblems ("a snarling wolf, embossed"), mass/inertia estimates
   via Zoo's file API, chamfered joint lead-ins, per-piece print-time estimates.
 

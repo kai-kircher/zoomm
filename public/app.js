@@ -1,7 +1,8 @@
 // Wheelwright UI — gathers params, replans live (same planner module the
 // server uses), drives the preview, and handles KCL/STL downloads.
 
-import { planWheel, DEFAULTS, IN } from '/lib/wheel.js';
+import { planWheel, DEFAULTS } from '/lib/wheel.js';
+import { convertFormUnits, fromMm } from '/lib/units.js';
 import { generateKcl, slugFor } from '/lib/kclgen.js';
 import { createPreview } from './preview.js';
 
@@ -82,9 +83,30 @@ const HC_FIELDS = {
   maxCells: { id: 'hcMaxCells' },
 };
 
+// The form's numbers only mean something together with the units selector, so
+// every change of it converts them in place (see /lib/units.js) — otherwise
+// the planner re-reads millimetres as inches.
+const formStore = {
+  get: (id) => $(id).value,
+  set: (id, v) => ($(id).value = v),
+};
+let formUnits = $('units').value;
+
+function setUnits(units) {
+  if (units === formUnits) return;
+  convertFormUnits(formStore, formUnits, units);
+  $('units').value = units;
+  formUnits = units;
+}
+
 function applyPreset(p) {
+  // Switch units first: that converts everything the form already holds, so
+  // the printer envelope and the two clearances — user settings no preset
+  // writes — keep the physical size the user gave them. The preset's own
+  // numbers land on top afterwards, already in its units.
+  setUnits(p.units);
   const flat = {
-    units: p.units, diameter: p.diameter, width: p.width, material: p.material,
+    diameter: p.diameter, width: p.width, material: p.material,
     infill: p.infill, spokeCount: p.spokeCount ?? 0, tread: p.tread, treadDepth: p.treadDepth,
   };
   for (const [k, v] of Object.entries(flat)) if ($(k) && v !== undefined) $(k).value = v;
@@ -104,7 +126,7 @@ function applyPreset(p) {
       continue;
     }
     const d = DEFAULTS.honeycomb[k];
-    $(f.id).value = f.len && p.units === 'in' ? Math.round((d / IN) * 1000) / 1000 : d;
+    $(f.id).value = f.len ? fromMm(d, p.units) : d;
   }
   updateVisibility();
   replan();
@@ -266,6 +288,7 @@ $('dlStl').addEventListener('click', async () => {
 // --- wiring ----------------------------------------------------------------
 document.querySelectorAll('#config input, #config select').forEach((el) => {
   el.addEventListener('input', () => {
+    if (el.id === 'units') setUnits(el.value);
     updateVisibility();
     replan();
   });

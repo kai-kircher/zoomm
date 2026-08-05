@@ -38,13 +38,19 @@ npm install
 npm start          # http://localhost:3000
 ```
 
-Optional, for one-click STL export from the UI:
+Optional, for one-click STL export from the UI — install the
+[Zoo CLI](https://zoo.dev/docs/developer-tools/cli) and provide a token either way:
 
 ```sh
-# install the Zoo CLI (https://zoo.dev/docs/developer-tools/cli), then:
-export ZOO_API_TOKEN=your-token
+cp .env.example .env    # then set ZOO_API_TOKEN (https://zoo.dev/account/api-tokens)
 npm start
 ```
+
+…or click the **Zoo status pill** (top right in the app) and paste a token there. A pasted
+token lives in that browser's localStorage only and rides each request in an `x-zoo-token`
+header — the server uses it per-request and never stores or logs it. `.env` / `.env.local`
+are loaded by a tiny dependency-free loader (real environment variables always win), and the
+CLI is found via `PATH`, `ZOO_CLI_PATH`, or a `./bin/zoo` drop-in.
 
 Without the CLI/token the app still does everything except server-side STL conversion — you
 download the KCL bundle and run `zoo kcl export --output-format=stl piece-A.kcl .` yourself, or

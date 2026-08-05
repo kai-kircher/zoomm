@@ -22,8 +22,21 @@
       <p>Any wheel, any printer — parametric segments that slide together. Powered by <a href="https://zoo.dev" target="_blank" rel="noreferrer">Zoo</a>'s KCL + Design API.</p>
     </div>
   </div>
-  <div class="header-right">
-    <span id="zooStatus" class="pill">checking Zoo…</span>
+  <div class="header-right token-wrap">
+    <button id="zooStatus" class="pill" type="button">checking Zoo…</button>
+    <div id="tokenPanel" class="token-panel hidden">
+      <h3>Zoo connection</h3>
+      <ul id="healthList" class="health-list"></ul>
+      <p class="hint">Set <code>ZOO_API_TOKEN</code> in <code>.env</code> (preferred, see <code>.env.example</code>) — or paste a token here. It stays in this browser only and rides each request; the server never stores it.</p>
+      <input id="tokenInput" type="password" placeholder="zoo-api-token…" autocomplete="off" spellcheck="false" />
+      <div class="token-actions">
+        <a href="https://zoo.dev/account/api-tokens" target="_blank" rel="noreferrer">Get a token ↗</a>
+        <span>
+          <button id="tokenClear" type="button">Clear</button>
+          <button id="tokenSave" type="button" class="primary">Save</button>
+        </span>
+      </div>
+    </div>
   </div>
 </header>
 

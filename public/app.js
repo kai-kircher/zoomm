@@ -168,11 +168,19 @@ function renderFileLinks() {
   }
 }
 
+// --- Zoo token (same scheme as zapim: .env on the server is preferred; a
+// token pasted here lives in localStorage only and rides each request in the
+// x-zoo-token header) ---------------------------------------------------------
+const TOKEN_KEY = 'wheelwright-zoo-token';
+const getStoredToken = () => localStorage.getItem(TOKEN_KEY) || '';
+const setStoredToken = (t) => (t ? localStorage.setItem(TOKEN_KEY, t.trim()) : localStorage.removeItem(TOKEN_KEY));
+const tokenHeaders = () => (getStoredToken() ? { 'x-zoo-token': getStoredToken() } : {});
+
 // --- downloads -------------------------------------------------------------
 async function postForBlob(url, msgOnFail) {
   const res = await fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...tokenHeaders() },
     body: JSON.stringify(gather()),
   });
   if (!res.ok) {
@@ -233,22 +241,60 @@ document.querySelectorAll('[data-preset]').forEach((btn) => {
 $('explode').addEventListener('input', (e) => preview?.setExplode(e.target.value / 100));
 $('fitView').addEventListener('change', (e) => preview?.setFitView(e.target.checked));
 
-fetch('/api/health')
-  .then((r) => r.json())
-  .then((h) => {
-    const el = $('zooStatus');
-    if (h.zoo.ready) {
+function renderHealth(h) {
+  const el = $('zooStatus');
+  el.classList.remove('ok', 'off');
+  let items;
+  if (!h) {
+    el.textContent = '○ static mode';
+    el.classList.add('off');
+    items = [[false, 'server API unreachable']];
+  } else {
+    const z = h.zoo;
+    if (z.ready) {
       el.textContent = '● Zoo export ready';
       el.classList.add('ok');
     } else {
-      el.textContent = h.zoo.cli ? '○ Zoo CLI found, token missing' : '○ Zoo CLI not on server — KCL download only';
+      el.textContent = z.cli ? '○ Zoo token needed' : '○ Zoo setup';
       el.classList.add('off');
     }
-  })
-  .catch(() => {
-    $('zooStatus').textContent = '○ static mode';
-    $('zooStatus').classList.add('off');
-  });
+    items = [
+      [z.token, z.token ? `API token configured${getStoredToken() ? ' (from this browser)' : ''}` : 'API token missing'],
+      [z.cli, z.cli ? `zoo CLI found${z.cliVersion ? ` (${z.cliVersion})` : ''}` : 'zoo CLI not found on server'],
+    ];
+  }
+  $('healthList').innerHTML = items
+    .map(([ok, text]) => `<li><span class="dot ${ok ? 'ok' : ''}"></span>${text}</li>`)
+    .join('');
+}
+
+function refreshHealth() {
+  fetch('/api/health', { headers: tokenHeaders() })
+    .then((r) => r.json())
+    .then(renderHealth)
+    .catch(() => renderHealth(null));
+}
+
+$('zooStatus').addEventListener('click', (e) => {
+  e.stopPropagation();
+  const panel = $('tokenPanel');
+  if (panel.classList.contains('hidden')) $('tokenInput').value = getStoredToken();
+  panel.classList.toggle('hidden');
+});
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('.token-wrap')) $('tokenPanel').classList.add('hidden');
+});
+$('tokenSave').addEventListener('click', () => {
+  setStoredToken($('tokenInput').value);
+  refreshHealth();
+  $('tokenPanel').classList.add('hidden');
+});
+$('tokenClear').addEventListener('click', () => {
+  setStoredToken('');
+  $('tokenInput').value = '';
+  refreshHealth();
+});
+refreshHealth();
 
 updateVisibility();
 createPreview($('stage')).then((pv) => {

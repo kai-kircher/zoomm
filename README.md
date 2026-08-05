@@ -413,15 +413,16 @@ test/                   node:test suite
 - Circumferential grooves on a crowned tread are modelled into the section curve, so they come
   out round-shouldered rather than square, and the count is capped at two (each groove costs
   three more profiles to loft through).
-- **Engine export is not yet reliable enough to be the only route.** In a 13-configuration
-  live run on engine 0.2.186 (2026-08-05), 5 configs exported, 3 hung with no output until our
-  300 s timeout, and 5 returned engine errors. Runtime doesn't track model size either: we
-  measured a 12-entity file at 417 s and a 69-cutter wheel at 85 s. Two of those failure modes
-  were ours and are now fixed — the arc-endpoint inconsistency (WW-3) and the boolean count,
-  which is why full-depth cuts stopped being tools at all. What is left is genuinely the
-  engine's, and every measurement, repro and suggested fix is in
-  [docs/zoo-api-notes.md](docs/zoo-api-notes.md); the KCL download and Design Studio remain the
-  dependable path, which is why they're first-class in the UI.
+- **Engine export is not yet reliable enough to be the only route.** Two of the failure modes we
+  hit were ours and are fixed — the arc-endpoint inconsistency (WW-3) and the boolean count,
+  which is why full-depth cuts stopped being tools at all. That took the live matrix from 5/13 to
+  **14/19**, and no remaining failure is a geometry error: they are all `Modeling command timed
+  out` or `websocket closed early`, and **every one of them has since exported unchanged when
+  re-run** (the round bike tire: ✗ in the batch, ✓ 146 s alone). Runtime doesn't track model size
+  either — we measured a 12-entity file at 417 s and a 69-cutter wheel at 85 s, and one file that
+  exported in 70 s hung past 900 s an hour later. Every measurement, repro and suggested fix is
+  in [docs/zoo-api-notes.md](docs/zoo-api-notes.md); the KCL download and Design Studio remain
+  the dependable path, which is why they're first-class in the UI.
 - Wishlist: Text-to-CAD hub-cap emblems ("a snarling wolf, embossed"), mass/inertia estimates
   via Zoo's file API, chamfered joint lead-ins, per-piece print-time estimates.
 

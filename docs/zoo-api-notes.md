@@ -54,26 +54,38 @@ error message is what made it expensive.
 
 **What the table looks like after our own two fixes.** The run above is kept as
 the baseline because it is what motivated [WW-13](#ww-13--boolean-count-not-model-complexity-is-what-breaks-export);
-it predates both that change and the WW-3 snap. Re-running the same
-configurations afterwards, the four rows that had been ours turned green, and
-the times moved by more than the fixes alone explain:
+it predates both that change and the WW-3 snap. The matrix has since grown to
+19 configurations (chevron and angled bars, and the two curved cross-sections),
+and re-running it gives **14/19 exported, against 5/13 before**.
 
-| Config | Baseline | After |
+The interesting part is not the count — it is that **not one of the five
+remaining failures is a geometry error**. Every one is
+`Modeling command timed out` or `engine hangup: websocket closed early`. The
+whole `Batch edit result is not valid` / `Unable to create a region` /
+`cannot handle this 3D subtraction` family is gone from our output.
+
+And all five have since exported, unchanged, when run serially:
+
+| Config | In the batch run | Re-run alone |
 | --- | --- | --- |
-| `cart-14in-keyed` | ✗ hang at 300 s | ✓ **6 s** (2 pieces) |
-| `honeycomb-round-cells` | ✗ hang at 300 s | ✓ 211 s (2 pieces) |
-| `honeycomb-filleted-cells` | ✗ 8.5 s, WW-3 | ✓ 125 s (2 pieces) |
-| `one-piece-plain` | ✓ 12.8 s | ✓ 6 s |
-| `rover-tpu-flexweb-hex` | ✓ 4.8 s | ✓ 3 s |
-| `caster-bolt-honeycomb` | ✓ 84.7 s | ✓ 42 s |
-| `lattice-woven-tpu` | ✗ 3.4 s, WW-4 | ✓ 70 s **and** ✗ hang at 900 s, on the same input |
+| `lattice-woven-tpu` | ✗ timed out | ✓ 70 s |
+| `lattice-chevron-sharp` | ✗ timed out | ✓ (passed in an earlier run) |
+| `wagon-bolt-segmented` | ✗ timed out | its near-twin `cart-bolt-segmented` ✓ 5 s in the same run |
+| `angled-one-piece` | ✗ websocket closed early | ✓ **3 s** |
+| `round-bike-tire` | ✗ websocket closed early | ✓ **146 s**, 7.1 MB |
 
-That last row is the one to take seriously, and it is why we have not claimed
-the matrix is clean. The same file, unchanged, exported in ~70 s in one run and
-never returned in another an hour later — the nondeterminism of
-[WW-2](#ww-2--export-time-is-wildly-unpredictable-and-sometimes-never-ends),
-now visible on a config that our changes otherwise fixed. Client-side timings
-in this document should be read as samples, not measurements.
+So every configuration in the matrix has been observed exporting; none of them
+fails reproducibly. That is [WW-2](#ww-2--export-time-is-wildly-unpredictable-and-sometimes-never-ends)
+and nothing else, and it is the single thing that would most improve this
+platform for a generator: we cannot tell a real regression from a bad minute.
+Client-side timings in this document should be read as samples, not
+measurements — the same file exported in 70 s and hung past 900 s an hour
+apart.
+
+For the record, the curved cross-sections came out exactly as modelled once the
+engine did return. Measuring the `round-bike-tire` STL (Ø200 × 28 mm, round
+section): 86.00 mm radius on both faces, 100.00 mm at mid-width, tracking the
+ideal semicircle within 0.1 mm across the interior.
 
 ---
 

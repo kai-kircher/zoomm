@@ -311,3 +311,10 @@ test/                   node:test suite
 - Preview approximates tread visually; the KCL carries the exact cuts.
 - Wishlist: Text-to-CAD hub-cap emblems ("a snarling wolf, embossed"), mass/inertia estimates
   via Zoo's file API, chamfered joint lead-ins, per-piece print-time estimates.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
+
+Vendored third-party code under `public/vendor/` (three.js and `OrbitControls`) is MIT
+licensed by the three.js authors and keeps its own copyright notice.

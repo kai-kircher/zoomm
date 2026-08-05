@@ -2,6 +2,7 @@
   "name": "wheelwright",
   "version": "0.1.0",
   "description": "Parametric 3D-printable wheel configurator powered by Zoo's Design API — splits any wheel into printer-sized segments that slide together.",
+  "license": "MIT",
   "type": "module",
   "main": "server.js",
   "scripts": {

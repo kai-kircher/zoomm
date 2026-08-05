@@ -157,6 +157,37 @@ test('keyway crossing a segment face is clipped to the face', () => {
   }
 });
 
+test('honeycomb piece triangulates cleanly (holes are disjoint)', () => {
+  // Overlapping hex cells fed to the triangulator as holes used to shred the
+  // flat faces into slivers. A clean triangulation's flat-face area equals
+  // the profile area minus the hole areas; a shredded one misses badly.
+  const plan = planWheel({ infill: 'honeycomb' });
+  assert.equal(plan.infillInfo.style, 'honeycomb');
+  for (const u of plan.uniquePieces) {
+    const shape = buildPieceShape(THREE, plan, u);
+    const outlinePts = shape.getPoints(96);
+    const expected =
+      Math.abs(THREE.ShapeUtils.area(outlinePts.map(({ x, y }) => ({ x, y })))) -
+      shape.holes.reduce((s, h) => s + Math.abs(THREE.ShapeUtils.area(h.getPoints(96))), 0);
+    const geo = new THREE.ExtrudeGeometry(shape, { depth: plan.W, bevelEnabled: false, curveSegments: 48 });
+    const pos = geo.getAttribute('position');
+    const idx = geo.getIndex();
+    let flatArea = 0;
+    const tri = (i) => [pos.getX(i), pos.getY(i), pos.getZ(i)];
+    const count = idx ? idx.count : pos.count;
+    const at = (n) => (idx ? idx.getX(n) : n);
+    for (let i = 0; i + 2 < count; i += 3) {
+      const [a, b, c] = [tri(at(i)), tri(at(i + 1)), tri(at(i + 2))];
+      if (Math.abs(a[2]) > 1e-6 || Math.abs(b[2]) > 1e-6 || Math.abs(c[2]) > 1e-6) continue; // bottom face only
+      flatArea += Math.abs((b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1])) / 2;
+    }
+    assert.ok(
+      Math.abs(flatArea - expected) / expected < 0.02,
+      `flat face area ${flatArea.toFixed(0)} ≈ profile minus holes ${expected.toFixed(0)}`
+    );
+  }
+});
+
 test('one-piece wheel keeps the bore as a real interior hole', () => {
   const plan = planWheel({ diameter: 120, width: 30, bore: { type: 'plain', diameter: 8 } });
   assert.equal(plan.N, 1);

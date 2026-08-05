@@ -116,6 +116,88 @@ test('honeycomb cell count is bounded', () => {
   }
 });
 
+// --- bolt holes vs segment seams -------------------------------------------
+
+// Reassemble the full wheel's bolt holes: every bolt cutter of every piece,
+// rotated from the piece's canonical frame back into the wheel frame.
+function assembledBoltHoles(plan) {
+  const byLabel = new Map(plan.uniquePieces.map((u) => [u.label, u]));
+  const holes = [];
+  for (const piece of plan.pieces) {
+    for (const c of byLabel.get(piece.label).cutters) {
+      if (!c.id.startsWith('bolt')) continue;
+      const ang = ((Math.atan2(c.c[1], c.c[0]) * 180) / Math.PI + piece.k * plan.segAngle + 720) % 360;
+      holes.push({ ang, r: Math.hypot(c.c[0], c.c[1]), holeR: c.r });
+    }
+  }
+  return holes.sort((a, z) => a.ang - z.ang);
+}
+
+// Millimetres from the closest hole edge to its nearest seam plane.
+function minSeamClearance(plan, holes) {
+  const A = plan.segAngle;
+  let worst = Infinity;
+  for (const h of holes) {
+    const off = ((h.ang % A) + A) % A;
+    const d = (Math.min(off, A - off) * Math.PI) / 180;
+    worst = Math.min(worst, h.r * Math.sin(d) - h.holeR);
+  }
+  return worst;
+}
+
+test('default 4-bolt hub: solver keeps 8 segments and rotates the pattern off the seams', () => {
+  const plan = planWheel({ bore: { type: 'bolt' } });
+  assert.equal(plan.N, 8);
+  assert.equal(plan.uniquePieces.length, 2);
+  const holes = assembledBoltHoles(plan);
+  assert.equal(holes.length, 4, 'assembled wheel has each bolt hole cut exactly once');
+  for (let i = 0; i < holes.length; i++) {
+    const gap = (holes[(i + 1) % holes.length].ang - holes[i].ang + 360) % 360;
+    assert.ok(Math.abs(gap - 90) < 0.05, `holes stay a true 4-bolt pattern (gap ${gap.toFixed(2)}°)`);
+    assert.ok(Math.abs(holes[i].r - plan.params.bore.boltCircle / 2) < 0.01, 'hole sits on the bolt circle');
+  }
+  assert.ok(minSeamClearance(plan, holes) >= 1, 'every hole edge clears every seam by ≥1 mm');
+  assert.ok(!plan.warnings.some((w) => /seam/i.test(w)), 'no seam warning for the default wheel');
+});
+
+test('forcing N=8 with 4 bolts centres every hole mid-window instead of on the seams', () => {
+  const plan = planWheel({
+    diameter: 300,
+    segmentsOverride: 8,
+    bore: { type: 'bolt', boltCount: 4, boltCircle: 60, boltHoleDia: 5.5, pilotDia: 12 },
+  });
+  assert.equal(plan.N, 8);
+  assert.equal(plan.uniquePieces.length, 2);
+  const holes = assembledBoltHoles(plan);
+  assert.equal(holes.length, 4);
+  for (const h of holes) {
+    const off = ((h.ang % 45) + 45) % 45;
+    assert.ok(Math.abs(off - 22.5) < 0.05, `hole at ${h.ang.toFixed(2)}° sits mid-window`);
+  }
+  assert.ok(!plan.warnings.some((w) => /seam/i.test(w)));
+});
+
+test('solver walks past the minimum when only a larger count clears the seams', () => {
+  const plan = planWheel({ bore: { type: 'bolt', boltCount: 11, boltCircle: 40, boltHoleDia: 5.5, pilotDia: 12 } });
+  assert.equal(plan.N, 11);
+  assert.equal(plan.uniquePieces.length, 1, '11 bolts on 11 segments print as one repeated piece');
+  const holes = assembledBoltHoles(plan);
+  assert.equal(holes.length, 11);
+  assert.ok(minSeamClearance(plan, holes) >= 1);
+  assert.ok(plan.notes.some((n) => /clear the segment seams/.test(n)));
+  assert.ok(!plan.warnings.some((w) => /seam/i.test(w)));
+});
+
+test('an unavoidable seam crossing (coprime override) still warns', () => {
+  const plan = planWheel({
+    diameter: 300,
+    segmentsOverride: 9,
+    bore: { type: 'bolt', boltCount: 4, boltCircle: 60, boltHoleDia: 5.5, pilotDia: 12 },
+  });
+  assert.equal(plan.N, 9);
+  assert.ok(plan.warnings.some((w) => /seam/i.test(w)), 'residual conflicts keep a loud warning');
+});
+
 test('sector wedges extend inside the bore so the cutter forms the true bore', () => {
   for (const cfg of [{}, { bore: { type: 'hex', hexAcrossFlats: 13 } }, { diameter: 300, bore: { type: 'bolt', boltCount: 4, boltCircle: 60, boltHoleDia: 5.5, pilotDia: 12 } }]) {
     const plan = planWheel({ diameter: 355.6, ...cfg });

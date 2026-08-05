@@ -129,10 +129,15 @@ export function normalizeParams(input = {}) {
     }
   }
   if (p.bore.type === 'bolt') {
-    const minBcd = p.bore.pilotDia + p.bore.boltHoleDia + 8;
+    // Pilot clearance, plus enough circumference that neighbouring bolt
+    // holes keep ≥3 mm of material between them.
+    const minBcd = Math.max(
+      p.bore.pilotDia + p.bore.boltHoleDia + 8,
+      (p.bore.boltHoleDia + 3) / Math.sin(d2r(180 / p.bore.boltCount))
+    );
     if (p.bore.boltCircle < minBcd) {
       p.bore.boltCircle = minBcd;
-      warnings.push(`Bolt circle was too small for the pilot bore; increased to ${rnd(minBcd, 1)} mm.`);
+      warnings.push(`Bolt circle was too small for the pilot bore and bolt spacing; increased to ${rnd(minBcd, 1)} mm.`);
     }
   }
   if (p.bore.diameter >= p.diameter * 0.5) {
@@ -320,6 +325,40 @@ export function planWheel(input = {}) {
   // preferring segment counts that yield fewer unique pieces.
   const boreSym = { plain: 0, keyed: 360, hex: 60, dbore: 360, bolt: 0 }[b.type];
 
+  // Bolt-circle placement. The half-pitch phase keeps the pattern symmetric
+  // about each piece's mid-angle — but when N/gcd(N, boltCount) is even that
+  // exact phase puts holes exactly on seams (the assembled wheel would get
+  // half-open holes). Relative to the seams the holes form a lattice of
+  // pitch 360·g/(N·boltCount); rotating the whole pattern by half that pitch
+  // centres it between seams, the largest clearance this N allows. The
+  // rotation applies only to the on-seam cases: for every other N the
+  // half-pitch phase is already lattice-centred.
+  const gcd = (a, c) => (c ? gcd(c, a % c) : a);
+  const boltR = b.boltCircle / 2;
+  const boltHoleR = b.boltHoleDia / 2 + clr / 2;
+  const boltPhaseFor = (n) => {
+    const p0 = 360 / b.boltCount / 2;
+    if (n <= 1) return p0;
+    const g = gcd(n, b.boltCount);
+    return (n / g) % 2 === 0 ? p0 + (180 * g) / (n * b.boltCount) : p0;
+  };
+  const boltAnglesFor = (n) => {
+    const ph = boltPhaseFor(n);
+    return Array.from({ length: b.boltCount }, (_, j) => mod(ph + (j * 360) / b.boltCount, 360));
+  };
+  // Millimetres between the closest bolt-hole edge and its nearest seam plane
+  // (negative = the hole crosses the seam).
+  const boltSeamClearMm = (n) => {
+    if (b.type !== 'bolt' || n <= 1) return Infinity;
+    const An = 360 / n;
+    let worst = Infinity;
+    for (const ang of boltAnglesFor(n)) {
+      const dAng = Math.min(mod(ang, An), An - mod(ang, An));
+      worst = Math.min(worst, boltR * Math.sin(d2r(dAng)) - boltHoleR);
+    }
+    return worst;
+  };
+
   const featureSigForPiece = (k, N) => {
     const A = 360 / N;
     const sig = { bore: null, key: null, bolts: [] };
@@ -347,9 +386,7 @@ export function planWheel(input = {}) {
       }
     }
     if (b.type === 'bolt') {
-      const phase = 360 / b.boltCount / 2;
-      for (let j = 0; j < b.boltCount; j++) {
-        const ang = mod(phase + (j * 360) / b.boltCount, 360);
+      for (const ang of boltAnglesFor(N)) {
         if (ang >= mod(w0, 360) - 1e-9 && ang < mod(w0, 360) + A - 1e-9) {
           sig.bolts.push(rnd(mod(ang - w0, 360), 2));
         } else if (N === 1) {
@@ -388,17 +425,47 @@ export function planWheel(input = {}) {
       N = 16;
       warnings.push('Even 16 segments do not fit this printer envelope; generated anyway at 16 — reduce diameter or use a larger printer.');
     } else {
-      let best = nMin;
-      let bestU = uniqueCount(nMin);
-      for (let n = nMin + 1; n <= Math.min(16, nMin + 4); n++) {
+      // Prefer counts that keep every bolt hole a solid wall's distance from
+      // the seams; among those, minimize unique pieces.
+      const seamOk = (n) => boltSeamClearMm(n) >= 1;
+      let best = 0;
+      let bestU = Infinity;
+      for (let n = nMin; n <= Math.min(16, nMin + 4); n++) {
+        if (!seamOk(n)) continue;
         const u = uniqueCount(n);
         if (u < bestU) {
           best = n;
           bestU = u;
         }
       }
+      if (!best) {
+        // Nothing near the minimum clears the seams; scan further out.
+        for (let n = nMin + 5; n <= 16; n++) {
+          if (fitsXY(segBBox(n)) && seamOk(n)) {
+            best = n;
+            break;
+          }
+        }
+      }
+      if (!best) {
+        best = nMin;
+        bestU = uniqueCount(nMin);
+        for (let n = nMin + 1; n <= Math.min(16, nMin + 4); n++) {
+          const u = uniqueCount(n);
+          if (u < bestU) {
+            best = n;
+            bestU = u;
+          }
+        }
+      }
       N = best;
-      if (N !== nMin) notes.push(`Chose ${N} segments (over minimum ${nMin}) so pieces come out identical for this hub type.`);
+      if (N !== nMin) {
+        notes.push(
+          seamOk(nMin)
+            ? `Chose ${N} segments (over minimum ${nMin}) so pieces come out identical for this hub type.`
+            : `Chose ${N} segments (over minimum ${nMin}) so bolt holes clear the segment seams.`
+        );
+      }
     }
   }
   const A = 360 / N;
@@ -406,6 +473,13 @@ export function planWheel(input = {}) {
   const jointOutN = joints.reduce((m, j) => Math.max(m, j.d), 0);
   if (W > uz) {
     warnings.push(`Wheel width ${rnd(W, 1)} mm exceeds printer Z height ${uz} mm — reduce width or use a taller printer.`);
+  }
+  // Residual bolt/seam conflicts survive only when the segment count was
+  // forced (override) or no fitting count clears the pattern.
+  if (b.type === 'bolt' && boltSeamClearMm(N) < 0.6) {
+    warnings.push(
+      'A bolt hole falls on or nearly touches a segment seam at this segment count; use a segment count that shares a factor with the bolt count (e.g. equal to it), or enlarge the bolt circle.'
+    );
   }
 
   // -------------------------------------------------------------------------
@@ -767,27 +841,11 @@ export function planWheel(input = {}) {
       }
     }
     if (b.type === 'bolt') {
-      const bcr = b.boltCircle / 2;
-      const hr = b.boltHoleDia / 2 + clr / 2;
-      const phase = 360 / b.boltCount / 2;
       let bi = 0;
-      for (let j = 0; j < b.boltCount; j++) {
-        const ang = mod(phase + (j * 360) / b.boltCount, 360);
+      for (const ang of boltAnglesFor(N)) {
         const inWindow = N === 1 || (ang >= mod(k * A, 360) - 1e-9 && ang < mod(k * A, 360) + A - 1e-9);
         if (inWindow) {
-          cut.push({ id: `bolt${++bi}`, shape: 'circle', c: polar(bcr, ang + rot).map((v) => rnd(v)), r: rnd(hr), ...zThrough });
-        }
-      }
-      // Warn once if a hole sits close to a seam.
-      if (k === 0 && N > 1) {
-        const minSeamAng = r2d((hr + 3) / bcr);
-        for (let j = 0; j < b.boltCount; j++) {
-          const ang = mod(phase + (j * 360) / b.boltCount, 360);
-          const distToSeam = Math.min(mod(ang, A), A - mod(ang, A));
-          if (distToSeam < minSeamAng) {
-            warnings.push('A bolt hole falls close to a segment seam; consider a bolt count that divides the segment count.');
-            break;
-          }
+          cut.push({ id: `bolt${++bi}`, shape: 'circle', c: polar(boltR, ang + rot).map((v) => rnd(v)), r: rnd(boltHoleR), ...zThrough });
         }
       }
     }

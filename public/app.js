@@ -48,6 +48,13 @@ const PRESETS = {
     tread: 'ribbed', treadDepth: 2,
     bore: { type: 'plain', diameter: 8 },
   },
+  bike: {
+    units: 'mm', diameter: 200, width: 28, material: 'tpu', infill: 'honeycomb',
+    tread: 'chevron', treadDepth: 2.2, treadAngle: 35,
+    profile: { shape: 'round' },
+    bore: { type: 'bolt', boltCount: 5, boltCircle: 60, boltHoleDia: 5, pilotDia: 12 },
+    honeycomb: { cellSize: 10, wall: 2.2 },
+  },
 };
 
 function gather() {
@@ -60,6 +67,13 @@ function gather() {
     spokeCount: $('spokeCount').value,
     tread: $('tread').value,
     treadDepth: $('treadDepth').value,
+    treadCount: $('treadCount').value,
+    treadAngle: $('treadAngle').value,
+    ribCount: $('ribCount').value,
+    profile: {
+      shape: $('profileShape').value,
+      crownDrop: $('crownDrop').value,
+    },
     bore: {
       type: $('boreType').value,
       diameter: $('boreDiameter').value,
@@ -157,6 +171,14 @@ function applyPreset(p) {
     boltCircle: 'boltCircle', boltHoleDia: 'boltHoleDia', pilotDia: 'pilotDia',
   };
   for (const [k, id] of Object.entries(boreMap)) if (p.bore[k] !== undefined) $(id).value = p.bore[k];
+  // Tread and profile tuning: a preset that says nothing about them falls back
+  // to the planner defaults, so switching preset never leaves a stray bar
+  // angle or crown behind from the last one.
+  $('treadCount').value = p.treadCount ?? DEFAULTS.treadCount;
+  $('treadAngle').value = p.treadAngle ?? DEFAULTS.treadAngle;
+  $('ribCount').value = p.ribCount ?? DEFAULTS.ribCount;
+  $('profileShape').value = p.profile?.shape ?? DEFAULTS.profile.shape;
+  $('crownDrop').value = p.profile?.crownDrop ?? fromMm(DEFAULTS.profile.crownDrop, p.units);
   // Web-style tuning falls back to the planner defaults (which are mm, so
   // they convert when the preset works in inches).
   for (const [group, fields] of Object.entries(STYLE_FIELDS)) {
@@ -223,7 +245,8 @@ function renderOutput(plan) {
     <div class="kv"><span>Usable bed</span><span>${plan.fit.usable.x} × ${plan.fit.usable.y} × ${plan.fit.usable.z} mm</span></div>
     ${jointTxt}
     <div class="kv"><span>Web</span><span>${describeInfill(plan.infillInfo)}</span></div>
-    <div class="kv"><span>Tread</span><span>${describeTread(plan.treadInfo)}</span></div>`;
+    <div class="kv"><span>Tread</span><span>${describeTread(plan.treadInfo)}</span></div>
+    <div class="kv"><span>Profile</span><span>${describeProfile(plan)}</span></div>`;
 
   $('pieceList').innerHTML = plan.uniquePieces
     .map(
@@ -265,9 +288,15 @@ function describeInfill(i) {
 }
 function describeTread(t) {
   const bits = [];
-  if (t.lugsTotal) bits.push(`${t.lugsTotal} lugs`);
-  if (t.grooves) bits.push(`${t.grooves} grooves`);
+  if (t.bars) bits.push(`${t.bars} bars${t.barAngle ? ` at ${t.barAngle}°` : ''}`);
+  if (t.ribs) bits.push(`${t.ribs} rib${t.ribs === 1 ? '' : 's'}`);
   return bits.length ? `${t.style} (${bits.join(', ')})` : t.style;
+}
+function describeProfile(plan) {
+  const pr = plan.profile;
+  if (pr.shape === 'flat') return 'flat (cylindrical)';
+  const kind = pr.shape === 'round' ? 'round section' : 'crowned';
+  return `${kind} — Ø${plan.radii.R * 2} at centre, Ø${(pr.shoulderR * 2).toFixed(1)} at the shoulders (section R${pr.crownRadius})`;
 }
 
 function renderFileLinks() {
@@ -328,7 +357,13 @@ $('dlStl').addEventListener('click', async () => {
   const btn = $('dlStl');
   btn.disabled = true;
   btn.textContent = 'Exporting via Zoo…';
-  $('exportMsg').textContent = '';
+  // A flat piece is seconds. A curved cross-section is lofted, and the engine
+  // spends minutes per piece fitting that surface — say so rather than let it
+  // look hung.
+  $('exportMsg').textContent =
+    plan.sections.length > 1
+      ? `Lofting a ${plan.profile.shape} cross-section through ${plan.sections.length} profiles — expect a few minutes per piece.`
+      : '';
   $('exportMsg').classList.remove('err');
   try {
     await postForBlob('/api/export/stl', 'STL export failed');

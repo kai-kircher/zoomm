@@ -10,7 +10,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import * as THREE from 'three';
 import { planWheel } from '../src/lib/wheel.js';
-import { tracePieceProfile, classifyCutters, shapeEmitter, buildPieceShape } from '../public/preview.js';
+import { tracePieceProfile, classifyCutters, shapeEmitter, buildPieceShape, buildLoftGeometry } from '../public/preview.js';
 
 // Records the traced profile as a point list (arcs sampled).
 function samplingEmitter() {
@@ -225,4 +225,81 @@ test('one-piece wheel keeps the bore as a real interior hole', () => {
     if (Math.hypot(x, y) < 4.5) quads.add((y >= 0 ? 2 : 0) + (x >= 0 ? 1 : 0));
   }
   assert.equal(quads.size, 4, 'bore hole wall surrounds the origin');
+});
+
+// The CAD lofts a crowned piece through its sections; the preview has to do
+// the same or it would advertise a bicycle tire and draw a cylinder.
+test('a crowned piece previews as a crowned mesh, not a cylinder', () => {
+  const plan = planWheel({ diameter: 200, width: 28, tread: 'slick', infill: 'solid', profile: { shape: 'round' }, bore: { type: 'plain', diameter: 12 } });
+  assert.ok(plan.sections.length > 2, 'round profile lofts through several sections');
+  const geo = buildLoftGeometry(THREE, plan, plan.uniquePieces[0]);
+  assert.ok(geo, 'loft geometry built');
+  const pos = geo.getAttribute('position');
+  // Widest radius seen in a thin z slab, at mid-width and at the shoulder.
+  const rMaxNear = (z0, z1) => {
+    let m = 0;
+    for (let i = 0; i < pos.count; i++) {
+      const z = pos.getZ(i);
+      if (z >= z0 && z <= z1) m = Math.max(m, Math.hypot(pos.getX(i), pos.getY(i)));
+    }
+    return m;
+  };
+  const R = plan.radii.R;
+  assert.ok(Math.abs(rMaxNear(plan.W / 2 - 0.01, plan.W / 2 + 0.01) - R) < 0.5, 'full radius at mid-width');
+  assert.ok(Math.abs(rMaxNear(-0.01, 0.01) - plan.profile.shoulderR) < 0.5, 'shoulder pulled in by the crown drop');
+  assert.ok(geo.getIndex().count > 0 && Number.isFinite(pos.array[0]));
+});
+
+// A stitched mesh is easy to get subtly wrong — a dropped quad, a cap wound
+// the wrong way, a triangulation borrowed from the wrong end. Every interior
+// edge belonging to exactly two faces catches all three.
+test('lofted preview meshes are watertight and face outwards', () => {
+  const CASES = [
+    ['round, one piece', { diameter: 200, width: 28, tread: 'slick', infill: 'solid', profile: { shape: 'round' }, bore: { type: 'plain', diameter: 12 } }],
+    ['crowned + bars', { tread: 'lugged', profile: { shape: 'crowned', crownDrop: 5 } }],
+    ['angled bars, flat', { tread: 'angled', treadAngle: 30 }],
+    ['chevron on a round section', { tread: 'chevron', treadAngle: 30, profile: { shape: 'round' } }],
+  ];
+  for (const [name, cfg] of CASES) {
+    const plan = planWheel(cfg);
+    const geo = buildLoftGeometry(THREE, plan, plan.uniquePieces[0]);
+    assert.ok(geo, `${name}: geometry built`);
+    const idx = geo.getIndex().array;
+    const edges = new Map();
+    for (let i = 0; i < idx.length; i += 3) {
+      const t = [idx[i], idx[i + 1], idx[i + 2]];
+      assert.equal(new Set(t).size, 3, `${name}: no degenerate triangles`);
+      for (let k = 0; k < 3; k++) {
+        const a = t[k];
+        const b = t[(k + 1) % 3];
+        const key = a < b ? `${a}_${b}` : `${b}_${a}`;
+        edges.set(key, (edges.get(key) || 0) + 1);
+      }
+    }
+    assert.equal([...edges.values()].filter((v) => v !== 2).length, 0, `${name}: every edge shared by two faces`);
+    // Normals on the tread band must point away from the axis.
+    geo.computeVertexNormals();
+    const pos = geo.getAttribute('position');
+    const nrm = geo.getAttribute('normal');
+    let outward = 0;
+    for (let i = 0; i < pos.count; i++) {
+      const x = pos.getX(i);
+      const y = pos.getY(i);
+      const r = Math.hypot(x, y);
+      if (r < plan.radii.R - 1) continue;
+      const dot = (x * nrm.getX(i) + y * nrm.getY(i)) / r;
+      assert.ok(dot > -0.3, `${name}: tread normal not inverted`);
+      if (dot > 0.3) outward++;
+    }
+    assert.ok(outward > 0, `${name}: tread surface found and facing out`);
+  }
+});
+
+test('a flat piece needs no loft and every section stays congruent', () => {
+  const flat = planWheel({ tread: 'lugged' });
+  assert.equal(flat.sections.length, 1);
+  // Bars slanting across the width still loft, and must sample to equal rings.
+  const angled = planWheel({ tread: 'angled', treadAngle: 30 });
+  assert.ok(angled.sections.length > 1);
+  assert.ok(buildLoftGeometry(THREE, angled, angled.uniquePieces[0]), 'angled bars loft cleanly');
 });

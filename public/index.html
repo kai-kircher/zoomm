@@ -52,6 +52,7 @@
         <button data-preset="interlaced">Interlaced airless</button>
         <button data-preset="auxetic">Auxetic scooter</button>
         <button data-preset="organic">Voronoi show wheel</button>
+        <button data-preset="bike">Round-section bike tire</button>
         <button data-preset="tiny">100 mm test</button>
       </div>
     </section>
@@ -125,13 +126,28 @@
 
       <label>Tread
         <select id="tread">
-          <option value="lugged">Lugged</option>
+          <option value="lugged">Lugged (straight bars)</option>
+          <option value="angled">Angled bars</option>
+          <option value="chevron">Chevron / V-bar</option>
           <option value="ribbed">Ribbed</option>
-          <option value="diamond">Diamond (both)</option>
+          <option value="diamond">Diamond (bars + ribs)</option>
           <option value="slick">Slick</option>
         </select>
       </label>
-      <label data-show="tread:lugged,ribbed,diamond">Tread depth <input id="treadDepth" type="number" step="any" value="3.5" /></label>
+      <label data-show="tread:lugged,angled,chevron,ribbed,diamond">Tread depth <input id="treadDepth" type="number" step="any" value="3.5" /></label>
+      <label data-show="tread:lugged,angled,chevron,diamond">Bars around wheel (0 = auto) <input id="treadCount" type="number" step="1" min="0" max="200" value="0" /></label>
+      <label data-show="tread:angled,chevron">Bar angle off axis <input id="treadAngle" type="number" step="1" min="0" max="60" value="25" /></label>
+      <label data-show="tread:ribbed,diamond">Ribs across width (0 = auto) <input id="ribCount" type="number" step="1" min="0" max="12" value="0" /></label>
+
+      <label>Tread profile
+        <select id="profileShape">
+          <option value="flat">Flat (cylindrical)</option>
+          <option value="crowned">Crowned</option>
+          <option value="round">Round (bicycle tire)</option>
+        </select>
+      </label>
+      <label data-show="profileShape:crowned">Crown drop at shoulder (0 = auto) <input id="crownDrop" type="number" step="any" min="0" value="0" /></label>
+      <p class="hint" data-show="profileShape:crowned,round">A curved tread is lofted rather than extruded, so STL export takes a few minutes per piece.</p>
     </section>
 
     <section>

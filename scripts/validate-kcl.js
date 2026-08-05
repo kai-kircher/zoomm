@@ -23,6 +23,14 @@ const CONFIGS = [
   // arcs) — both are shapes the engine sees nowhere else in the matrix.
   ['honeycomb-round-cells', { diameter: 400, width: 70, infill: 'honeycomb', tread: 'slick', honeycomb: { cellSize: 18, wall: 3, cellShape: 'round' } }],
   ['honeycomb-filleted-cells', { diameter: 400, width: 70, infill: 'honeycomb', tread: 'ribbed', honeycomb: { cellSize: 18, cornerRadius: 2.5, orientation: 'tangential' } }],
+  // The chart-drawn webs (lattice / auxetic / voronoi) all emit many-sided
+  // closed line loops with an explicit region seed — a shape the engine sees
+  // nowhere else, and one where a self-crossing loop or a seed that missed
+  // its own cell would only show up here.
+  ['lattice-woven-tpu', { diameter: 260, width: 55, material: 'tpu', infill: 'lattice', tread: 'ribbed', lattice: { rows: 3, cornerRadius: 2 } }],
+  ['lattice-chevron-sharp', { diameter: 300, width: 50, infill: 'lattice', tread: 'lugged', lattice: { rows: 1, cornerRadius: 0 } }],
+  ['auxetic-reentrant-hex', { diameter: 200, width: 40, material: 'tpu', infill: 'auxetic', tread: 'lugged', bore: { type: 'hex', hexAcrossFlats: 13 }, auxetic: { rings: 2, waist: 0.4 } }],
+  ['voronoi-organic-bolt', { diameter: 180, width: 40, infill: 'voronoi', tread: 'slick', bore: { type: 'bolt', boltCount: 5, boltCircle: 70, boltHoleDia: 5.5, pilotDia: 14 }, voronoi: { seed: 7 } }],
   ['wagon-bolt-segmented', { diameter: 355.6, bore: { type: 'bolt', boltCount: 4, boltCircle: 60, boltHoleDia: 5.5, pilotDia: 12 } }],
   ['dbore-diamond-solid', { diameter: 200, width: 45, infill: 'solid', tread: 'diamond', bore: { type: 'dbore', diameter: 12 } }],
   // Segmented bolt hub (N=8 at the default diameter): the pilot bore must be

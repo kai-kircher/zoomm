@@ -12,7 +12,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { planWheel, LENGTH_FIELDS, IN } from '../src/lib/wheel.js';
-import { LENGTH_INPUTS, convertLength, convertFormUnits } from '../src/lib/units.js';
+import { LENGTH_INPUTS, convertLength, convertFormUnits, isLengthInput } from '../src/lib/units.js';
 
 const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
 
@@ -69,6 +69,23 @@ test('every length input is a real field in the form', () => {
   for (const { id } of LENGTH_INPUTS) {
     assert.match(html, new RegExp(`<input id="${id}"`), `#${id} exists in index.html`);
   }
+});
+
+test('counts, ratios and choices are not lengths', () => {
+  // The web-style tuning groups mix lengths with counts and ratios, and
+  // applyPreset converts a default exactly when isLengthInput says so — a
+  // ratio like the auxetic waist, sitting next to a wall thickness, must
+  // never be multiplied by 25.4.
+  const notLengths = [
+    'spokeCount', 'boltCount', 'segmentsOverride',
+    'hcOrientation', 'hcCellShape', 'hcMaxCells',
+    'ltRows', 'ltStruts', 'axRings', 'axWaist', 'voCells', 'voSeed',
+  ];
+  for (const id of notLengths) {
+    assert.match(html, new RegExp(`<(input|select) id="${id}"`), `#${id} exists in index.html`);
+    assert.equal(isLengthInput(id), false, `#${id} is not a length`);
+  }
+  for (const { id } of LENGTH_INPUTS) assert.equal(isLengthInput(id), true, `#${id} is a length`);
 });
 
 test('converting a length preserves the physical size', () => {

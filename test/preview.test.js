@@ -157,22 +157,29 @@ test('keyway crossing a segment face is clipped to the face', () => {
   }
 });
 
-const HONEYCOMB_VARIANTS = [
-  ['default cells', {}],
-  ['tuned hex cells', { cellSize: 16, wall: 4 }],
-  ['round cells', { cellSize: 16, cellShape: 'round' }],
-  ['filleted cells', { cellSize: 16, cornerRadius: 2.5 }],
-  ['tangential lattice', { cellSize: 16, orientation: 'tangential' }],
+const WEB_VARIANTS = [
+  ['honeycomb, default cells', { infill: 'honeycomb' }],
+  ['honeycomb, tuned hex cells', { infill: 'honeycomb', honeycomb: { cellSize: 16, wall: 4 } }],
+  ['honeycomb, round cells', { infill: 'honeycomb', honeycomb: { cellSize: 16, cellShape: 'round' } }],
+  ['honeycomb, filleted cells', { infill: 'honeycomb', honeycomb: { cellSize: 16, cornerRadius: 2.5 } }],
+  ['honeycomb, tangential lattice', { infill: 'honeycomb', honeycomb: { cellSize: 16, orientation: 'tangential' } }],
+  ['lattice, woven', { infill: 'lattice' }],
+  ['lattice, chevron', { infill: 'lattice', lattice: { rows: 1 } }],
+  ['lattice, sharp corners', { infill: 'lattice', lattice: { rows: 4, cornerRadius: 0 } }],
+  ['auxetic, default rings', { infill: 'auxetic' }],
+  ['auxetic, deep waist', { infill: 'auxetic', auxetic: { rings: 4, waist: 0.2 } }],
+  ['voronoi, default seed', { infill: 'voronoi' }],
+  ['voronoi, dense', { infill: 'voronoi', voronoi: { cells: 40, seed: 12 } }],
 ];
 
-for (const [variant, honeycomb] of HONEYCOMB_VARIANTS) {
-  test(`honeycomb piece triangulates cleanly, holes disjoint: ${variant}`, () => {
-    // Overlapping hex cells fed to the triangulator as holes used to shred
-    // the flat faces into slivers. A clean triangulation's flat-face area
-    // equals the profile area minus the hole areas; a shredded one misses
-    // badly. Every cell shape and lattice orientation must pass.
-    const plan = planWheel({ infill: 'honeycomb', honeycomb });
-    assert.equal(plan.infillInfo.style, 'honeycomb');
+for (const [variant, cfg] of WEB_VARIANTS) {
+  test(`web piece triangulates cleanly, holes disjoint: ${variant}`, () => {
+    // Overlapping cells fed to the triangulator as holes used to shred the
+    // flat faces into slivers. A clean triangulation's flat-face area equals
+    // the profile area minus the hole areas; a shredded one misses badly.
+    // Every web style and cell shape must pass.
+    const plan = planWheel(cfg);
+    assert.equal(plan.infillInfo.style, cfg.infill, `${variant} produced its web`);
     for (const u of plan.uniquePieces) {
       const shape = buildPieceShape(THREE, plan, u);
       const outlinePts = shape.getPoints(96);

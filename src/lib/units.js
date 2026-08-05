@@ -32,6 +32,13 @@ export const LENGTH_INPUTS = Object.freeze([
   { id: 'hcCellSize', path: ['honeycomb', 'cellSize'] },
   { id: 'hcWall', path: ['honeycomb', 'wall'] },
   { id: 'hcCornerRadius', path: ['honeycomb', 'cornerRadius'] },
+  { id: 'ltStrutWidth', path: ['lattice', 'strutWidth'] },
+  { id: 'ltCornerRadius', path: ['lattice', 'cornerRadius'] },
+  { id: 'axCellSize', path: ['auxetic', 'cellSize'] },
+  { id: 'axWall', path: ['auxetic', 'wall'] },
+  { id: 'axCornerRadius', path: ['auxetic', 'cornerRadius'] },
+  { id: 'voWall', path: ['voronoi', 'wall'] },
+  { id: 'voCornerRadius', path: ['voronoi', 'cornerRadius'] },
   { id: 'printerX', path: ['printer', 'x'] },
   { id: 'printerY', path: ['printer', 'y'] },
   { id: 'printerZ', path: ['printer', 'z'] },
@@ -66,6 +73,12 @@ export function convertLength(v, from, to) {
 
 // A millimetre default (DEFAULTS in wheel.js) as the form's current unit.
 export const fromMm = (mm, units) => convertLength(mm, 'mm', units);
+
+// Does this input hold a length? The per-web-style tuning groups mix lengths
+// with counts and ratios, and the form asks here rather than tracking it
+// twice — a field the switch converts is exactly a field whose millimetre
+// default has to be converted before it is written.
+export const isLengthInput = (id) => LENGTH_INPUTS.some((f) => f.id === id);
 
 // Rewrite every length input so it describes the same physical size in the
 // new unit. `store` is { get(id), set(id, value) } — the DOM inputs in the

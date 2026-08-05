@@ -46,6 +46,14 @@ export const DEFAULTS = Object.freeze({
     boltHoleDia: 5.5,
     pilotDia: 12,
   },
+  honeycomb: {
+    cellSize: 0, // hex across-flats; 0 = auto from the web band width
+    wall: 2.6, // material left between neighbouring cells
+    orientation: 'radial', // radial (vertex at the rim) | tangential (flat at the rim)
+    cellShape: 'hex', // hex | round
+    cornerRadius: 0, // hex corner fillet; 0 = sharp, auto-capped at the inradius
+    maxCells: 64, // per-segment budget; cells are grown to stay under it
+  },
   printer: { x: 220, y: 220, z: 250, margin: 10 },
   joint: { clearance: 0.15 }, // per-side dovetail slide clearance
   boreClearance: 0.2,
@@ -64,6 +72,9 @@ const LENGTH_FIELDS = [
   ['bore', 'boltCircle'],
   ['bore', 'boltHoleDia'],
   ['bore', 'pilotDia'],
+  ['honeycomb', 'cellSize'],
+  ['honeycomb', 'wall'],
+  ['honeycomb', 'cornerRadius'],
   ['printer', 'x'],
   ['printer', 'y'],
   ['printer', 'z'],
@@ -87,6 +98,7 @@ export function normalizeParams(input = {}) {
     ...structuredClone(DEFAULTS),
     ...structuredClone(input),
     bore: { ...structuredClone(DEFAULTS.bore), ...structuredClone(input.bore || {}) },
+    honeycomb: { ...structuredClone(DEFAULTS.honeycomb), ...structuredClone(input.honeycomb || {}) },
     printer: { ...structuredClone(DEFAULTS.printer), ...structuredClone(input.printer || {}) },
     joint: { ...structuredClone(DEFAULTS.joint), ...structuredClone(input.joint || {}) },
   };
@@ -99,6 +111,7 @@ export function normalizeParams(input = {}) {
   p.spokeCount = Math.max(0, Math.round(Number(p.spokeCount) || 0));
   p.segmentsOverride = Math.max(0, Math.round(Number(p.segmentsOverride) || 0));
   p.bore.boltCount = clamp(Math.round(Number(p.bore.boltCount) || 4), 2, 12);
+  p.honeycomb.maxCells = clamp(Math.round(Number(p.honeycomb.maxCells) || DEFAULTS.honeycomb.maxCells), 8, 240);
 
   // Convert to mm.
   if (p.units === 'in') {
@@ -121,6 +134,11 @@ export function normalizeParams(input = {}) {
   if (!['solid', 'spokes', 'honeycomb', 'flexweb'].includes(p.infill)) p.infill = 'spokes';
   if (!['slick', 'ribbed', 'lugged', 'diamond'].includes(p.tread)) p.tread = 'lugged';
   if (!['plain', 'keyed', 'hex', 'dbore', 'bolt'].includes(p.bore.type)) p.bore.type = 'plain';
+  if (!['radial', 'tangential'].includes(p.honeycomb.orientation)) p.honeycomb.orientation = 'radial';
+  if (!['hex', 'round'].includes(p.honeycomb.cellShape)) p.honeycomb.cellShape = 'hex';
+  p.honeycomb.cellSize = p.honeycomb.cellSize > 0 ? clamp(p.honeycomb.cellSize, 3, 250) : 0;
+  p.honeycomb.wall = clamp(p.honeycomb.wall, 0.8, 25);
+  p.honeycomb.cornerRadius = Math.max(0, p.honeycomb.cornerRadius);
 
   const rb = p.bore.diameter / 2;
   if (p.bore.type === 'dbore') {
@@ -181,6 +199,51 @@ function regularPoly(cx, cy, circumR, n, startAngleDeg) {
     pts.push([cx + circumR * Math.cos(d2r(a)), cy + circumR * Math.sin(d2r(a))]);
   }
   return pts;
+}
+
+const unit = (v) => {
+  const L = Math.hypot(v[0], v[1]) || 1;
+  return [v[0] / L, v[1] / L];
+};
+
+// Fillet every corner of a CCW convex polygon: straight runs between tangent
+// points, CCW corner arcs of radius r. Caller keeps r within what the edges
+// can absorb (for a regular hexagon of circumradius cr that is cr·√3/2, where
+// the tangent points meet at the edge midpoints and the shape becomes a
+// circle). Returned as a closed lines+arcs loop — the 'path' cutter form.
+function roundedPolySegs(pts, r) {
+  const n = pts.length;
+  const corners = pts.map((V, i) => {
+    const P = pts[(i + n - 1) % n];
+    const Nx = pts[(i + 1) % n];
+    const dIn = unit([V[0] - P[0], V[1] - P[1]]);
+    const dOut = unit([Nx[0] - V[0], Nx[1] - V[1]]);
+    // Exterior turn angle; setback along each edge is r·tan(turn/2).
+    const turn = Math.abs(Math.atan2(dIn[0] * dOut[1] - dIn[1] * dOut[0], dIn[0] * dOut[0] + dIn[1] * dOut[1]));
+    const t = r * Math.tan(turn / 2);
+    const t1 = [V[0] - dIn[0] * t, V[1] - dIn[1] * t];
+    return {
+      t1,
+      t2: [V[0] + dOut[0] * t, V[1] + dOut[1] * t],
+      // Center sits one radius along the inward (left-of-travel) normal.
+      c: [t1[0] - dIn[1] * r, t1[1] + dIn[0] * r],
+    };
+  });
+  const segs = [];
+  for (let i = 0; i < n; i++) {
+    const prev = corners[(i + n - 1) % n];
+    const cur = corners[i];
+    segs.push({ kind: 'line', a: prev.t2.map((v) => rnd(v)), b: cur.t1.map((v) => rnd(v)) });
+    segs.push({
+      kind: 'arc',
+      a: cur.t1.map((v) => rnd(v)),
+      b: cur.t2.map((v) => rnd(v)),
+      center: cur.c.map((v) => rnd(v)),
+      radius: rnd(r),
+      ccw: true,
+    });
+  }
+  return segs;
 }
 
 // Distance from the origin to segment ab (an edge can pass closer to the
@@ -629,16 +692,34 @@ export function planWheel(input = {}) {
     // Hex cells on a true honeycomb lattice, aligned to the piece bisector:
     // uniform `wall` between every pair of neighbouring cells by
     // construction. A cell is kept only when it fits entirely inside the web
-    // band and clear of the seam keep-outs. (Per-row polar placement used to
-    // re-pitch and re-centre every row, so the half-pitch stagger drifted
-    // out of phase and staggered rows overlapped — cells merged into open
-    // voids in the CAD and broke the preview triangulation.)
-    let cr = clamp(bandW / 8, 4, 12); // hex circumradius
-    const wall = 2.6;
+    // band and clear of the seam keep-outs. Cell size, wall, lattice
+    // orientation, corner rounding and the per-segment budget are all user
+    // parameters (p.honeycomb); every one of them is a property of the
+    // lattice, so the no-overlap guarantee holds for any combination.
+    // (Per-row polar placement used to re-pitch and re-centre every row, so
+    // the half-pitch stagger drifted out of phase and staggered rows
+    // overlapped — cells merged into open voids in the CAD and broke the
+    // preview triangulation.)
+    const GROW = 1.28; // cell-size step taken when the count is over budget
+    const hc = p.honeycomb;
+    const wall = hc.wall;
+    // Requested cell size is the across-flats width (how honeycomb infill is
+    // normally quoted); the lattice math wants the circumradius.
+    const reqCr = hc.cellSize > 0 ? hc.cellSize / Math.sqrt(3) : clamp(bandW / 8, 4, 12);
+    let cr = reqCr;
     const dFace = jointOutN + 2.5; // straight-line keep-out from each seam plane
     const bis = A / 2;
     const eR = [Math.cos(d2r(bis)), Math.sin(d2r(bis))]; // lattice axis along the bisector
     const eT = [-eR[1], eR[0]];
+    // Lattice frame: cells are pointy along the row-step axis eB and packed
+    // along eA. 'radial' steps rows outward (a vertex faces the rim);
+    // 'tangential' swaps the axes, turning the whole lattice 30° so a flat
+    // faces the rim instead. Uniform walls hold either way — the stagger and
+    // the pitches travel with the axes.
+    const tangential = hc.orientation === 'tangential';
+    const eA = tangential ? eR : eT;
+    const eB = tangential ? eT : eR;
+    const cellAng = bis + (tangential ? 30 : 0); // vertex direction = eB (mod 60°)
     const sinA = Math.sin(d2r(A));
     const cosA = Math.cos(d2r(A));
     const rMid = (rWebIn + rWebOut) / 2;
@@ -653,35 +734,89 @@ export function planWheel(input = {}) {
       }
       return true;
     };
+    // Skip growth passes that are certain to be over budget: a hex lattice
+    // site occupies pitchA × pitchB, so the sector's web area estimates the
+    // cell count for a size (3 mm cells on a 1.5 m wheel are tens of
+    // thousands of candidates per pass, and this replans on every keystroke).
+    // The jump is quantised to whole GROW steps and held two steps short of
+    // the estimate, so it can only ever land on a size the loop below would
+    // have walked through anyway — the outcome is the plain loop's, faster.
+    const webArea = 0.5 * d2r(A) * (rWebOut ** 2 - rWebIn ** 2);
+    const siteArea = (cr * Math.sqrt(3) + wall) * (cr * 1.5 + (wall * Math.sqrt(3)) / 2);
+    const skip = Math.floor(Math.log(Math.max(1, webArea / siteArea / hc.maxCells)) / (2 * Math.log(GROW))) - 2;
+    if (skip > 0) cr *= GROW ** skip;
     let cells = [];
-    for (let attempt = 0; attempt < 4; attempt++) {
+    for (let attempt = 0; attempt < 12; attempt++) {
       cells = [];
-      const pitchT = cr * Math.sqrt(3) + wall; // across-flats + wall
-      const pitchR = cr * 1.5 + (wall * Math.sqrt(3)) / 2;
-      const jMax = Math.ceil((rMid + rWebOut + cr) / pitchR);
-      const iMax = Math.ceil((rWebOut + cr) / pitchT);
-      for (let j = -jMax; j <= jMax; j++) {
-        const v = rMid + j * pitchR;
-        for (let i = -iMax; i <= iMax; i++) {
-          const u = (i + (j & 1 ? 0.5 : 0)) * pitchT;
-          const pts = regularPoly(u * eT[0] + v * eR[0], u * eT[1] + v * eR[1], cr, 6, bis);
-          if (fits(pts)) cells.push(pts);
+      const pitchA = cr * Math.sqrt(3) + wall; // across-flats + wall
+      const pitchB = cr * 1.5 + (wall * Math.sqrt(3)) / 2;
+      const reach = rMid + rWebOut + cr; // lattice origin sits at rMid, cells within rWebOut
+      const bMax = Math.ceil(reach / pitchB);
+      const aMax = Math.ceil(reach / pitchA);
+      const corner = []; // cell-local vertex offsets, same for every cell
+      for (let k = 0; k < 6; k++) corner.push(polar(cr, cellAng + k * 60));
+      for (let j = -bMax; j <= bMax; j++) {
+        const v = j * pitchB;
+        for (let i = -aMax; i <= aMax; i++) {
+          const u = (i + (j & 1 ? 0.5 : 0)) * pitchA;
+          const cx = rMid * eR[0] + u * eA[0] + v * eB[0];
+          const cy = rMid * eR[1] + u * eA[1] + v * eB[1];
+          const rc = Math.hypot(cx, cy);
+          if (rc > rWebOut + cr || rc < rWebIn - cr) continue; // cheap ring reject
+          const pts = corner.map((o) => [cx + o[0], cy + o[1]]);
+          if (fits(pts)) cells.push({ c: [cx, cy], pts });
         }
       }
-      if (cells.length <= 64) break;
-      cr *= 1.28;
+      if (cells.length <= hc.maxCells) break;
+      cr *= GROW;
     }
-    cells.forEach((pts, i) => {
-      shared.push({
-        id: `hex${i + 1}`,
-        shape: 'poly',
-        pts: pts.map((q) => [rnd(q[0]), rnd(q[1])]),
-        ...zThrough,
-      });
+    if (cells.length > hc.maxCells) {
+      notes.push(`Honeycomb hit the ${hc.maxCells}-cell budget; extra cells dropped — raise the budget or the cell size.`);
+      cells = cells.slice(0, hc.maxCells);
+    } else if (hc.cellSize > 0 && cr > reqCr + 1e-9) {
+      notes.push(
+        `Honeycomb cell size grown ${rnd(hc.cellSize, 1)} → ${rnd(cr * Math.sqrt(3), 1)} mm across flats to stay within the ${hc.maxCells}-cell budget.`
+      );
+    }
+    // A round cell is the fillet taken to its limit — the hex's inscribed
+    // circle — so both shapes share one lattice and one wall guarantee.
+    const cellIn = (cr * Math.sqrt(3)) / 2; // inradius = half the across-flats width
+    const fillet = hc.cellShape === 'round' ? cellIn : clamp(hc.cornerRadius, 0, cellIn);
+    const round = fillet >= cellIn - 1e-6;
+    cells.forEach((cell, i) => {
+      const id = `hex${i + 1}`;
+      const c = [rnd(cell.c[0]), rnd(cell.c[1])];
+      if (round) {
+        shared.push({ id, shape: 'circle', c, r: rnd(cellIn), ...zThrough });
+      } else if (fillet > 0.05) {
+        shared.push({ id, shape: 'path', segs: roundedPolySegs(cell.pts, fillet), interior: c, ...zThrough });
+      } else {
+        shared.push({ id, shape: 'poly', pts: cell.pts.map((q) => [rnd(q[0]), rnd(q[1])]), ...zThrough });
+      }
     });
-    infillInfo = { style: 'honeycomb', cellsPerSegment: cells.length, cellCircumradius: rnd(cr, 1) };
-    if (!cells.length) {
-      notes.push('Honeycomb cells did not fit; web left solid.');
+    infillInfo = {
+      style: 'honeycomb',
+      cellsPerSegment: cells.length,
+      cellCircumradius: rnd(cr, 1),
+      cellAcrossFlats: rnd(cr * Math.sqrt(3), 1),
+      cellShape: round ? 'round' : fillet > 0.05 ? 'rounded hex' : 'hex',
+      cornerRadius: round ? rnd(cellIn, 2) : rnd(fillet, 2),
+      wall: rnd(wall, 2),
+      orientation: hc.orientation,
+    };
+    if (cells.length) {
+      if (hc.cornerRadius > cellIn + 1e-9 && hc.cellShape !== 'round') {
+        notes.push(`Honeycomb corner radius capped at ${rnd(cellIn, 2)} mm (half the cell's across-flats width) — cells are round.`);
+      }
+      if (wall < 1.2) {
+        notes.push(`Honeycomb wall ${rnd(wall, 2)} mm is under three 0.4 mm extrusions; expect a fragile web on a stock nozzle.`);
+      }
+    } else {
+      notes.push(
+        hc.cellSize > 0
+          ? `Honeycomb cells did not fit (${rnd(hc.cellSize, 1)} mm across flats + ${rnd(wall, 2)} mm wall in a ${rnd(bandW, 1)} mm web); web left solid.`
+          : 'Honeycomb cells did not fit; web left solid.'
+      );
       infillInfo = { style: 'solid' };
     }
   } else if (infill === 'flexweb' && bandW > 12) {

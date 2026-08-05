@@ -15,7 +15,9 @@ and the glue-up instructions.
 
 - **Configure the wheel**: diameter, width, material (PLA/PETG/ABS/TPU), web structure
   (spokes / honeycomb / airless flex-web / solid), tread (lugged / ribbed / diamond / slick),
-  and hub interface (keyed shaft, plain, hex, D-bore, or bolt circle with pilot).
+  and hub interface (keyed shaft, plain, hex, D-bore, or bolt circle with pilot). The honeycomb
+  web tunes further — [cell size, wall, orientation, corner rounding and cell
+  budget](#tuning-the-honeycomb-web).
 - **Give it your print envelope**: bed X/Y, height Z, edge margin.
 - **It plans the build**: picks the smallest segment count whose pieces fit the bed, sizes
   slide-together dovetails into the rim and hub rings, keeps structural webs clear of the seams,
@@ -57,7 +59,7 @@ download the KCL bundle and run `zoo kcl export --output-format=stl piece-A.kcl 
 export from Design Studio.
 
 ```sh
-npm test           # 40 unit tests: chunking math, joints, dedupe, piece profiles, KCL well-formedness
+npm test           # 51 unit tests: chunking math, joints, dedupe, piece profiles, honeycomb lattice, KCL well-formedness
 npm run validate:kcl   # regenerates a config matrix; round-trips through Zoo's engine when a token is set
 ```
 
@@ -118,6 +120,25 @@ half-open hole.
 
 Honeycomb cells sit on a true hex lattice aligned to the piece bisector, so neighbouring cells
 keep a uniform wall and never merge — within a piece or across a seam.
+
+### Tuning the honeycomb web
+
+The honeycomb style has its own parameter group (`honeycomb`, shown in the sidebar when you pick
+that web style). Every knob is a property of the lattice itself, so the uniform-wall and
+never-overlap guarantees hold for any combination:
+
+| Option | Default | What it does |
+|---|---|---|
+| `cellSize` | `0` (auto) | Cell width across flats. Auto sizes cells to the web band (band ÷ 8, 4–12 mm circumradius). |
+| `wall` | `2.6` mm | Material left between neighbouring cells — the same everywhere by construction. |
+| `orientation` | `radial` | `radial` points a cell vertex at the rim; `tangential` turns the whole lattice 30° so a flat faces it. |
+| `cellShape` | `hex` | `round` replaces each hex with its inscribed circle — same lattice, same walls, no stress-raising corners. |
+| `cornerRadius` | `0` (sharp) | Fillets the hex corners. Capped at half the across-flats width, where the cell becomes `round`. |
+| `maxCells` | `64` | Per-segment cell budget. Cells are grown until they fit it, keeping the KCL (and the boolean count) sane. |
+
+Sizes follow the units selector, like every other length. Ask for cells too small for the budget
+and the planner grows them and says so in the build notes; ask for cells too big for the web band
+and it leaves the web solid rather than half-cutting the rim.
 
 ### Adhesive guidance (the flexible-glue question)
 

@@ -1,6 +1,8 @@
 // The preview must show the same solid the KCL engine produces. The planner
 // overshoots each segment wedge past the bore and lets the bore cutters trim
 // the tip (see wheel.js); the preview folds that trim into the piece profile.
+// Concentric bolt/plain bores are the exception: their bore arc is already
+// the outline's inner boundary and there is no bore cutter to fold.
 // These tests pin the regression where the bore was fed to ExtrudeGeometry as
 // a crossing hole, growing a phantom thin-walled cylinder at every piece tip.
 
@@ -48,8 +50,13 @@ function assertTrueProfile(plan, u) {
       assert.ok(th > -1 && th < plan.segAngle + 1, `hub point stays in wedge (r=${r.toFixed(2)} θ=${th.toFixed(1)}°)`);
     }
   }
+  // With a bore family the fold must lift the overshot wedge tip onto the
+  // bore; without one (concentric bolt/plain bores) the outline already is
+  // the true profile and bottoms out exactly at rInner = bore radius.
+  const { boreFamily } = classifyCutters(u.cutters);
+  const floor = boreFamily.length ? plan.radii.rInner + 0.1 : plan.radii.rInner - 1e-6;
   assert.ok(
-    minR > plan.radii.rInner + 0.1,
+    minR > floor,
     `inner boundary sits on the bore, not the wedge tip (minR=${minR.toFixed(2)}, rInner=${plan.radii.rInner})`
   );
   return { minR, pts: em.pts };
@@ -124,7 +131,7 @@ test('D-bore: pieces facing the flat bottom out at the flat offset', () => {
   assert.ok(sawFlat, 'some piece contains the deepest point of the flat');
 });
 
-test('bolt hub: pilot bore folds into the outline, bolt holes stay holes', () => {
+test('bolt hub: outline carries the pilot bore, bolt holes stay holes', () => {
   const plan = planWheel({ bore: { type: 'bolt' } });
   assert.ok(plan.N > 1);
   let boltHoles = 0;
@@ -133,7 +140,7 @@ test('bolt hub: pilot bore folds into the outline, bolt holes stay holes', () =>
     assert.ok(Math.abs(minR - 6.2) < 0.05, `pilot radius ${minR.toFixed(3)} ≈ 6.2`);
     const { holes, boreFamily } = classifyCutters(u.cutters);
     boltHoles += holes.filter((c) => c.id.startsWith('bolt')).length;
-    assert.equal(boreFamily.length, 1, 'only the pilot circle belongs to the bore family');
+    assert.equal(boreFamily.length, 0, 'the pilot circle lives in the outline, not in a cutter');
     assertMeshHasNoPhantom(plan, u);
   }
   assert.ok(boltHoles > 0, 'bolt holes remain interior holes on the pieces that carry them');

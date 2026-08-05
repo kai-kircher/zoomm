@@ -89,7 +89,9 @@ function traceKeyedBore(bore, keyway, emit) {
 // boundary is the polar curve ρ(θ) = furthest bore boundary along the ray θ.
 // We fold that curve straight into the outline and drop the bore cutters
 // from the hole list. One-piece wheels keep the bore as a genuine interior
-// hole — there it never crosses the outline.
+// hole — there it never crosses the outline. Segmented bolt/plain hubs skip
+// the overshoot entirely (their concentric bore arc IS the outline, no bore
+// cutter emitted), so they take the empty-bore-family fast path below.
 
 const cross2 = (a, b) => a[0] * b[1] - a[1] * b[0];
 

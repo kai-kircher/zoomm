@@ -66,7 +66,8 @@ downloading the KCL bundle are entirely local.
    Usable bed        210 × 210 × 250 mm
    Joints per seam   2 dovetails (hub, rim)
    Web               6 spokes
-   Tread             lugged (54 lugs)
+   Tread             lugged (54 bars)
+   Profile           flat (cylindrical)
    piece A × 1   fits printer
    piece B × 5   fits printer
    ```
@@ -127,11 +128,27 @@ on the number you typed rather than 2.59999.
 | --- | --- |
 | Web style | `spokes`, `solid`, `honeycomb`, `flexweb`, `lattice`, `auxetic`, `voronoi` — see [§5](#5-choosing-a-web). |
 | *(per-style group)* | Each style reveals its own parameters; every length follows the units selector. Full tables in the [README](../README.md#the-airless-webs). |
-| Tread | `lugged` (axial slots), `ribbed` (circumferential grooves), `diamond` (both), `slick`. |
+| Tread | `lugged` (straight bars), `angled`, `chevron` (V-bar), `ribbed` (circumferential grooves), `diamond` (bars + grooves), `slick`. |
 | Tread depth | 0.8 mm – 6 % of diameter. Ignored for slick. |
+| Bars around wheel | `0` = auto (about one bar per 20 mm of circumference). Snapped to a multiple of the segment count. |
+| Bar angle | Slant off the wheel's axis, for `angled` and `chevron`. |
+| Ribs across width | `0` = auto (one per 14 mm). |
+| Tread profile | `flat` (cylindrical), `crowned`, or `round` — the tire's cross-section. |
+| Crown drop | How much smaller the radius is at each shoulder than at mid-width. `0` = auto (12 % of the width). `round` sets it to the half-width for you. |
 
 Tread feature counts snap to multiples of the segment count, so seams land
 between features and every segment carries the same tread.
+
+**Bar angle and bar count trade against each other.** A bar can only lean as far
+as the gap to its neighbour allows. Leave the bar count on auto and the planner
+spaces the bars out to give you the angle you asked for — 45° on a 14″ wheel
+gives 12 bars where a straight tread gives 54. Set a bar count yourself and the
+angle gives way instead, and the plan says what it settled on.
+
+**A curved profile costs export time.** `crowned` and `round` pieces are lofted
+through several profiles instead of extruded once, which the engine finds much
+harder: minutes per piece against seconds. The configurator warns you before you
+click Export.
 
 ### Hub / mating
 
@@ -183,7 +200,7 @@ printer's number once.
 | Piece footprint | Bounding box of one piece **as printed** (already rotated flat), plus the wheel width as its Z. |
 | Usable bed | Your bed minus the edge margin. Compare it with the footprint. |
 | Joints per seam | How many dovetails each seam carries (`hub`, `rim`, sometimes `web`). |
-| Web / Tread | What the planner actually laid out — cell counts, wall, lug/groove counts. |
+| Web / Tread / Profile | What the planner actually laid out — cell counts, wall, bar and rib counts, and the tire's cross-section. |
 | piece X × n | The dedupe result: how many prints of each unique file. |
 | fits printer / does not fit | Whether the piece footprint fits the usable bed (and the width fits Z). |
 
@@ -378,9 +395,10 @@ preview, and the download bundle are local.
 
 **Is the preview the real geometry?**
 Yes — the preview and the KCL come from the same plan object, and the preview
-renders the piece's true carved profile (not an approximation of it). The one
-deliberate simplification is tread: the preview suggests it visually, the KCL
-carries the exact cuts.
+renders the piece's true carved profile (not an approximation of it), including
+the tread bars and the crown — a crowned wheel is lofted in the preview exactly
+as it is in the CAD. The one deliberate simplification left is circumferential
+grooves, which are drawn as an overlay; the KCL subtracts them for real.
 
 **Will the pieces really slide together?**
 The dovetail pockets are the tenon geometry plus your clearance per side, and

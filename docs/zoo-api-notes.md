@@ -16,7 +16,7 @@ edges of a CAD kernel, and most of what follows was found that way.
 | Component | Version / how | How hard we leaned on it |
 | --- | --- | --- |
 | Design API engine | `zoo` CLI **0.2.186**, `zoo kcl export --output-format=stl` | 13-configuration matrix (`npm run validate:kcl`) plus ~35 individual exports during bisection, all on 2026-08-05 |
-| KCL language | solver-sketch dialect, `@settings(defaultLengthUnit = mm, kclVersion = 1.0)` | every generated piece; 105 offline tests assert its well-formedness |
+| KCL language | solver-sketch dialect, `@settings(defaultLengthUnit = mm, kclVersion = 1.0)` | every generated piece; 115 offline tests assert its well-formedness |
 | `zoo kcl lint` | CLI 0.2.186, no token | probed as an offline validation story |
 | Zoo CLI packaging | `scripts/setup-zoo.mjs`, KittyCAD/cli GitHub releases | per-platform install for anyone cloning the repo |
 
@@ -51,6 +51,41 @@ below was afterwards reproduced **serially, with nothing else in flight**, and
 the reproductions are what the findings rest on. One finding (WW-3) was our bug
 as much as Zoo's; it is fixed in this repo and reported here anyway, because the
 error message is what made it expensive.
+
+**What the table looks like after our own two fixes.** The run above is kept as
+the baseline because it is what motivated [WW-13](#ww-13--boolean-count-not-model-complexity-is-what-breaks-export);
+it predates both that change and the WW-3 snap. The matrix has since grown to
+19 configurations (chevron and angled bars, and the two curved cross-sections),
+and re-running it gives **14/19 exported, against 5/13 before**.
+
+The interesting part is not the count — it is that **not one of the five
+remaining failures is a geometry error**. Every one is
+`Modeling command timed out` or `engine hangup: websocket closed early`. The
+whole `Batch edit result is not valid` / `Unable to create a region` /
+`cannot handle this 3D subtraction` family is gone from our output.
+
+And all five have since exported, unchanged, when run serially:
+
+| Config | In the batch run | Re-run alone |
+| --- | --- | --- |
+| `lattice-woven-tpu` | ✗ timed out | ✓ 70 s |
+| `lattice-chevron-sharp` | ✗ timed out | ✓ (passed in an earlier run) |
+| `wagon-bolt-segmented` | ✗ timed out | its near-twin `cart-bolt-segmented` ✓ 5 s in the same run |
+| `angled-one-piece` | ✗ websocket closed early | ✓ **3 s** |
+| `round-bike-tire` | ✗ websocket closed early | ✓ **146 s**, 7.1 MB |
+
+So every configuration in the matrix has been observed exporting; none of them
+fails reproducibly. That is [WW-2](#ww-2--export-time-is-wildly-unpredictable-and-sometimes-never-ends)
+and nothing else, and it is the single thing that would most improve this
+platform for a generator: we cannot tell a real regression from a bad minute.
+Client-side timings in this document should be read as samples, not
+measurements — the same file exported in 70 s and hung past 900 s an hour
+apart.
+
+For the record, the curved cross-sections came out exactly as modelled once the
+engine did return. Measuring the `round-bike-tire` STL (Ø200 × 28 mm, round
+section): 86.00 mm radius on both faces, 100.00 mm at mid-width, tracking the
+ideal semicircle within 0.1 mm across the interior.
 
 ---
 
@@ -244,6 +279,82 @@ WW-4 (still unexplained), WW-2 (silence is worse than any message), WW-1
 
 ---
 
+### WW-12 · Booleans reject any operand with curved faces
+
+*Severity: 🟠*
+
+- **Error:** `engine: The Zoo engine cannot handle this 3D subtraction yet.
+  Please report this as an issue` — and the matching `…3D intersection yet` for
+  `intersect`.
+- **What we were doing:** giving a wheel a crowned tread (a bicycle-tire
+  cross-section). The natural CAD move is to revolve the tire's section and
+  subtract, or intersect the prismatic piece with a barrel envelope.
+- **Repro:** a 60 mm disk, 20 mm tall, against a ring built four different ways.
+  Everything else identical; nothing else in flight.
+
+  | Tool | Operation | Result |
+  | --- | --- | --- |
+  | `extrude` of an annulus region | `subtract` | ✓ |
+  | `revolve` of a rectangle in XZ (geometrically the *same ring*) | `subtract` | ✗ 3.0 s |
+  | `revolve` of an arc-bounded crown profile, strictly overlapping (no tangency) | `subtract` | ✗ 2.0 s |
+  | `loft` of 7 circle sections (barrel) | `intersect` | ✗ 16 s |
+  | `loft` of 7 annulus sections (shoulder ring) | `subtract` | ✗ 26 s |
+
+  The first two rows are the finding: the same ring passes as an extrude and
+  fails as a revolve, so this is about how the operand was *built*, not what
+  shape it is. We also ruled out tangency — a crown arc strictly inside the
+  blank, crossing its surface transversally, fails the same way.
+- **The reverse direction works.** A revolved solid is fine as the *target*:
+  `subtract([revolvedBlank], tools = [extrudedCylinder])` exports in 2 s. So it
+  is specifically curved-face **operands** (tools, or either side of an
+  `intersect`) that are refused.
+- **Workaround shipped:** none is possible — a crown cannot be cut in at all.
+  We build it into the piece's own profile instead, lofting through one sketch
+  per z level. That works, but it costs 170–300 s per piece against 3–6 s for
+  the extruded equivalent, and it means any feature that varies across the
+  width has to be expressible as a stack of congruent 2D profiles.
+- **Suggested fix:** if this is a known gap, say so in the `revolve` and `loft`
+  docs — "the result cannot yet be used as a boolean operand" would have saved
+  us the afternoon we spent probing for it. The current message invites a bug
+  report for what appears to be a documented-nowhere limitation, and it names
+  neither operand nor the reason.
+
+### WW-13 · Boolean count, not model complexity, is what breaks export
+
+*Severity: 🟠*
+
+- **What we measured:** the same wheel, same finished solid, emitted two ways.
+
+  | Emission | Tools | Entities in the sketch | Result |
+  | --- | --- | --- | --- |
+  | One `subtract` tool per full-depth cut | 12 | ~30 | ✓ **80 s** |
+  | Every full-depth cut as another loop in one sketch | 0 | ~90 | ✓ **3 s** |
+
+  Both produce a 500-triangle solid of 202 cm³ (we diffed the exported STLs:
+  identical bounding box, identical volume to 0.1%, same vertex count on the
+  tread floor). The engine is ~25× faster resolving ninety entities in a single
+  `region()` than twelve booleans over the same geometry.
+- **It is not only speed.** Configurations that merely have *more* cuts were the
+  ones failing in the 2026-08-05 matrix: 14 tools → `Batch edit result is not
+  valid` in 4 s; 58 tools → engine hangup mid-`subtract`; 7 tools including four
+  full-ring grooves → past the 300 s timeout with no output. All of them export
+  now that the cuts are loops.
+- **Sliver booleans are the worst case.** Subtracting a full 360° annulus ring
+  from a 60° sector — the obvious way to cut a circumferential groove — is what
+  took a plain ribbed wheel past five minutes. Clipping the same cutter to a
+  wedge slightly wider than the piece fixes it.
+- **Workaround shipped:** full-depth cuts are no longer booleans at all. Only
+  partial-depth cuts (circumferential grooves on a flat tread) remain tools, and
+  they are wedges rather than rings.
+- **Suggested fix:** this is worth a line in the KCL authoring guidance —
+  "prefer multiple loops in one sketch over repeated `subtract`" is
+  non-obvious, is the opposite of how a human would draw it, and is worth
+  roughly an order of magnitude. If there is a practical ceiling on tools per
+  model, publishing it would let generators plan around it rather than discover
+  it as a hangup.
+
+---
+
 ## Part 2 — Tooling and packaging
 
 ### WW-6 · `zoo kcl lint` is parse-only, and its output is a Rust `Debug` dump
@@ -397,7 +508,7 @@ Credit where it's due; these are why the project is built on Zoo at all.
 ## Reproducing all of this
 
 ```sh
-npm run validate:kcl          # 13 configs; with a token, every piece round-trips through the engine
+npm run validate:kcl          # 19 configs; with a token, every piece round-trips through the engine
 ```
 
 The KCL for every configuration lands in `out/validate/…` and is byte-stable

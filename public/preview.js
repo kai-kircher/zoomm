@@ -10,19 +10,19 @@ const unwrapCCW = (a0, a1) => (a1 <= a0 ? a1 + TAU * Math.ceil((a0 - a1) / TAU +
 const unwrapCW = (a0, a1) => (a1 >= a0 ? a1 - TAU * Math.ceil((a1 - a0) / TAU + 1e-9) : a1);
 
 // Split cutters into the bore family (bore + keyway, hugging the piece
-// origin), face holes (full-depth, interior) and overlays (tread).
+// origin), face holes (full-depth, interior) and circumferential grooves,
+// which are the only cut left that does not run the full width. Tread bars
+// are not here at all — they are notches in the section outlines now.
 export function classifyCutters(cutters) {
   const boreFamily = [];
   const holes = [];
   const grooves = [];
-  const lugs = [];
   for (const c of cutters) {
-    if (c.shape === 'annulus') grooves.push(c);
-    else if (c.id.startsWith('lug')) lugs.push(c);
+    if (c.id.startsWith('groove')) grooves.push(c);
     else if (c.id === 'bore' || c.id === 'keyway') boreFamily.push(c);
     else holes.push(c);
   }
-  return { boreFamily, holes, grooves, lugs };
+  return { boreFamily, holes, grooves };
 }
 
 // Build path commands for a cutter (shared by three.js Path and Path2D).
@@ -152,21 +152,27 @@ function boreRho(boreFamily) {
 // region folded into the inner boundary. Returns true when the bore family
 // was consumed by the outline; false when the caller must render it as
 // interior holes instead (one-piece wheels).
-export function tracePieceProfile(plan, unique, emit) {
-  if (plan.outline.kind === 'circle') {
-    emit.move(plan.outline.r, 0);
-    emit.arc(0, 0, plan.outline.r, 0, TAU, true);
+export function tracePieceProfile(plan, unique, emit, section = plan.outline) {
+  // One-piece wheels: the boundary is the whole rim, either a plain circle or
+  // a ring with the tread bars notched into it, and the bore never crosses it.
+  if (section.kind === 'circle') {
+    emit.move(section.r, 0);
+    emit.arc(0, 0, section.r, 0, TAU, true);
+    return false;
+  }
+  if (section.kind === 'ring') {
+    traceSegs(section.segs, emit);
     return false;
   }
   const { boreFamily } = classifyCutters(unique.cutters);
   if (!boreFamily.length) {
-    traceSegs(plan.outline.segs, emit);
+    traceSegs(section.segs, emit);
     return true;
   }
   const rho = boreRho(boreFamily);
   const rMin = plan.radii.rInner; // safety floor; ρ ≥ boreMinR > rInner
   const A = d2r(plan.segAngle);
-  const src = plan.outline.segs;
+  const src = section.segs;
   // All but the planner's inner arc, with the two face ends pulled out of
   // the bore onto ρ. The stitch points always land on the innermost
   // straight face segments (bore < first dovetail).
@@ -205,20 +211,153 @@ export function shapeEmitter(target) {
   };
 }
 
-// Full 2D profile (outline + interior holes) of a piece as a THREE.Shape —
-// shared by the 3D renderer and the geometry tests.
-export function buildPieceShape(THREE, plan, unique) {
-  const shape = new THREE.Shape();
-  const consumed = tracePieceProfile(plan, unique, shapeEmitter(shape));
+// Every loop that bounds material in a section: the piece boundary first,
+// then the interior holes. `consumed` says whether the bore was folded into
+// the boundary (segmented pieces) or is still one of the holes (one-piece).
+function pieceLoops(plan, unique, section) {
   const { boreFamily, holes } = classifyCutters(unique.cutters);
-  const addHole = (fn) => {
+  let consumed = false;
+  const outer = (emit) => {
+    consumed = tracePieceProfile(plan, unique, emit, section);
+  };
+  const inner = [];
+  const probe = { move() {}, line() {}, arc() {} };
+  outer(probe); // resolve `consumed` before deciding what the holes are
+  if (!consumed && boreFamily.length) inner.push(...boreHoleTracers(boreFamily));
+  for (const h of holes) inner.push((e) => traceCutter(h, e));
+  return { outer, inner };
+}
+
+// Full 2D profile (outline + interior holes) of a piece as a THREE.Shape —
+// shared by the 3D renderer and the geometry tests. Defaults to the widest
+// section, which is the piece's silhouette.
+export function buildPieceShape(THREE, plan, unique, section = plan.outline) {
+  const shape = new THREE.Shape();
+  const { outer, inner } = pieceLoops(plan, unique, section);
+  outer(shapeEmitter(shape));
+  for (const fn of inner) {
     const p = new THREE.Path();
     fn(shapeEmitter(p));
     shape.holes.push(p);
-  };
-  if (!consumed && boreFamily.length) for (const tr of boreHoleTracers(boreFamily)) addHole(tr);
-  for (const h of holes) addHole((e) => traceCutter(h, e));
+  }
   return shape;
+}
+
+// --- crowned pieces --------------------------------------------------------
+// A crowned piece is lofted in the CAD (see kclgen.js), so the preview lofts
+// it too rather than pretending it is a cylinder. Every section is built from
+// the same segment structure by construction, so sampling each of them with a
+// fixed number of points per segment gives matching rings that stitch
+// straight into quad strips. Holes are identical at every height, so their
+// walls come out vertical exactly as the CAD builds them.
+const ARC_STEPS = 18;
+
+function polylineEmitter(out) {
+  return {
+    move: (x, y) => out.push([x, y]),
+    line: (x, y) => out.push([x, y]),
+    arc: (cx, cy, r, a0, a1) => {
+      for (let i = 1; i <= ARC_STEPS; i++) {
+        const a = a0 + (a1 - a0) * (i / ARC_STEPS);
+        out.push([cx + r * Math.cos(a), cy + r * Math.sin(a)]);
+      }
+    },
+  };
+}
+
+// Closing the loop lands the last sample back on the first; drop it so the
+// stitched quads are never degenerate. Every section samples the same way, so
+// this keeps them the same length.
+const sampleLoop = (fn) => {
+  const pts = [];
+  fn(polylineEmitter(pts));
+  while (pts.length > 3 && Math.hypot(pts[pts.length - 1][0] - pts[0][0], pts[pts.length - 1][1] - pts[0][1]) < 1e-7) pts.pop();
+  return pts;
+};
+
+const signedArea = (pts) => {
+  let a = 0;
+  for (let i = 0; i < pts.length; i++) {
+    const p = pts[i];
+    const q = pts[(i + 1) % pts.length];
+    a += p[0] * q[1] - q[0] * p[1];
+  }
+  return a / 2;
+};
+
+// Returns a BufferGeometry, or null when the sections did not sample to
+// matching rings — the caller then falls back to a plain extrusion rather
+// than drawing something torn.
+export function buildLoftGeometry(THREE, plan, unique) {
+  const rings = [];
+  let inner = null;
+  for (const sec of plan.sections) {
+    const parts = pieceLoops(plan, unique, sec);
+    if (!inner) inner = parts.inner.map(sampleLoop);
+    rings.push(sampleLoop(parts.outer));
+  }
+  if (rings.length < 2 || rings.some((r) => r.length !== rings[0].length || r.length < 3)) return null;
+
+  const loops = [rings[0], ...inner]; // shapes/offsets are the same at every z
+  const offsets = [];
+  let total = 0;
+  for (const l of loops) {
+    offsets.push(total);
+    total += l.length;
+  }
+  const K = plan.sections.length;
+  const pos = new Float32Array(total * K * 3);
+  for (let i = 0; i < K; i++) {
+    const z = plan.sections[i].z;
+    const ring = [rings[i], ...inner];
+    let v = i * total;
+    for (const l of ring) {
+      for (const [x, y] of l) {
+        pos[v * 3] = x;
+        pos[v * 3 + 1] = y;
+        pos[v * 3 + 2] = z;
+        v++;
+      }
+    }
+  }
+
+  const idx = [];
+  // Side walls, one quad strip per loop per gap. Winding follows each loop's
+  // own orientation so the outer skin and the hole walls both face outwards.
+  loops.forEach((l, li) => {
+    const flip = signedArea(l) < 0;
+    for (let i = 0; i < K - 1; i++) {
+      for (let j = 0; j < l.length; j++) {
+        const j2 = (j + 1) % l.length;
+        const a = i * total + offsets[li] + j;
+        const b = i * total + offsets[li] + j2;
+        const c = (i + 1) * total + offsets[li] + j2;
+        const d = (i + 1) * total + offsets[li] + j;
+        if (flip) idx.push(a, c, b, a, d, c);
+        else idx.push(a, b, c, a, c, d);
+      }
+    }
+  });
+  // Caps. Each end is triangulated from its own ring: an angled tread rotates
+  // the notches from section to section, so one end's triangulation laid over
+  // the other's points would fold triangles inside out along the bars.
+  const holeVecs = inner.map((l) => l.map(([x, y]) => new THREE.Vector2(x, y)));
+  const ccw = signedArea(rings[0]) > 0;
+  for (const end of [0, K - 1]) {
+    const base = end * total;
+    const contour = rings[end].map(([x, y]) => new THREE.Vector2(x, y));
+    const down = end === 0; // the z = 0 cap faces −Z, the far one +Z
+    for (const [a, b, c] of THREE.ShapeUtils.triangulateShape(contour, holeVecs)) {
+      if (down === ccw) idx.push(base + a, base + c, base + b);
+      else idx.push(base + a, base + b, base + c);
+    }
+  }
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  geo.setIndex(idx);
+  geo.computeVertexNormals();
+  return geo;
 }
 
 export async function createPreview(canvas) {
@@ -264,10 +403,17 @@ function create3D(canvas, { T: THREE, OrbitControls }) {
   let groups = [];
 
   function buildPieceGeometry(plan, unique) {
-    const { grooves, lugs } = classifyCutters(unique.cutters);
-    const shape = buildPieceShape(THREE, plan, unique);
-    const geo = new THREE.ExtrudeGeometry(shape, { depth: plan.W, bevelEnabled: false, curveSegments: 48 });
-    return { geo, grooves, lugs };
+    const { grooves } = classifyCutters(unique.cutters);
+    // Crowned pieces are lofted; flat ones extrude, which is cheaper and
+    // gives the arcs a finer tessellation.
+    const geo =
+      (plan.sections.length > 1 ? buildLoftGeometry(THREE, plan, unique) : null) ||
+      new THREE.ExtrudeGeometry(buildPieceShape(THREE, plan, unique), {
+        depth: plan.W,
+        bevelEnabled: false,
+        curveSegments: 48,
+      });
+    return { geo, grooves };
   }
 
   function rebuild() {
@@ -284,7 +430,7 @@ function create3D(canvas, { T: THREE, OrbitControls }) {
     const segRad = d2r(plan.segAngle);
     if (!state.fitView) {
       for (const piece of plan.pieces) {
-        const { geo, grooves, lugs } = geoByLabel.get(piece.label);
+        const { geo, grooves } = geoByLabel.get(piece.label);
         const mat = new THREE.MeshStandardMaterial({
           color: PIECE_COLORS[piece.k % PIECE_COLORS.length],
           roughness: 0.55,
@@ -292,26 +438,18 @@ function create3D(canvas, { T: THREE, OrbitControls }) {
         });
         const g = new THREE.Group();
         g.add(new THREE.Mesh(geo, mat));
-        // tread overlays (visual approximation; KCL carries the exact cuts)
+        // Circumferential grooves are the only cut the mesh does not already
+        // carry (tread bars are notches in the profile now), so they stay an
+        // overlay — the KCL subtracts them for real.
         const darkMat = new THREE.MeshStandardMaterial({ color: DARK, roughness: 0.9 });
         for (const gr of grooves) {
+          const rIn = gr.rIn ?? plan.radii.R - plan.radii.treadEff;
           const ring = new THREE.Mesh(
-            new THREE.TorusGeometry((gr.rIn + plan.radii.R) / 2, (gr.z1 - gr.z0) / 2, 8, 64, plan.N === 1 ? TAU : segRad),
+            new THREE.TorusGeometry((rIn + plan.radii.R) / 2, (gr.z1 - gr.z0) / 2, 8, 64, plan.N === 1 ? TAU : segRad),
             darkMat
           );
           ring.position.z = (gr.z0 + gr.z1) / 2;
           g.add(ring);
-        }
-        for (const lug of lugs) {
-          const c = lug.pts.reduce((s, p) => [s[0] + p[0], s[1] + p[1]], [0, 0]).map((v) => v / 4);
-          const ang = Math.atan2(c[1], c[0]);
-          const rr = Math.hypot(c[0], c[1]);
-          const wS = Math.hypot(lug.pts[2][0] - lug.pts[1][0], lug.pts[2][1] - lug.pts[1][1]);
-          const dS = Math.hypot(lug.pts[1][0] - lug.pts[0][0], lug.pts[1][1] - lug.pts[0][1]);
-          const box = new THREE.Mesh(new THREE.BoxGeometry(dS * 0.7, wS, plan.W + 0.4), darkMat);
-          box.position.set(Math.cos(ang) * (plan.radii.R - dS * 0.3), Math.sin(ang) * (plan.radii.R - dS * 0.3), plan.W / 2);
-          box.rotation.z = ang;
-          g.add(box);
         }
         g.userData.k = piece.k;
         g.rotation.z = piece.k * segRad;
@@ -462,23 +600,18 @@ function create2D(canvas) {
       ctx.lineWidth = 1 / scale;
       ctx.stroke(outline);
 
-      const { boreFamily, holes, grooves, lugs } = classifyCutters(u.cutters);
+      const { boreFamily, holes, grooves } = classifyCutters(u.cutters);
       const hp = new Path2D();
       if (!boreConsumed && boreFamily.length) for (const tr of boreHoleTracers(boreFamily)) tr(pathEmitter(hp));
       for (const c of holes) traceCutter(c, pathEmitter(hp));
       ctx.fillStyle = '#0d1117';
       ctx.fill(hp, 'evenodd');
-      ctx.fillStyle = '#10141d';
-      for (const lug of lugs) {
-        const lp = new Path2D();
-        traceCutter(lug, pathEmitter(lp));
-        ctx.fill(lp);
-      }
       ctx.strokeStyle = '#10141d';
       for (const gr of grooves) {
-        ctx.lineWidth = (gr.z1 - gr.z0) / scale > 0 ? Math.max(1 / scale, 1.2) : 1;
+        const rIn = gr.rIn ?? R - plan.radii.treadEff;
+        ctx.lineWidth = Math.max(1 / scale, 1.2);
         ctx.beginPath();
-        ctx.arc(0, 0, (gr.rIn + R) / 2, 0, plan.N === 1 ? TAU : d2r(plan.segAngle));
+        ctx.arc(0, 0, (rIn + R) / 2, 0, plan.N === 1 ? TAU : d2r(plan.segAngle));
         ctx.stroke();
       }
       ctx.restore();

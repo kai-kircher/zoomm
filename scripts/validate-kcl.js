@@ -37,6 +37,20 @@ const CONFIGS = [
   // carried by the sector outline — the engine rejects the old tip-trim
   // subtract of the concentric pilot circle over the wedge tip.
   ['cart-bolt-segmented', { bore: { type: 'bolt' }, infill: 'solid', tread: 'slick' }],
+  // Tread bars are notches in the piece profile, so a busy bar pattern is the
+  // case that used to blow up (engine hangups, "Batch edit result is not
+  // valid") and is now just a longer sketch. Chevron and angled bars move
+  // those notches from section to section, which is what the loft has to
+  // stitch; a one-piece wheel closes the ring across the 0°/360° seam.
+  ['chevron-segmented', { diameter: 300, width: 50, infill: 'solid', tread: 'chevron', treadAngle: 30 }],
+  ['angled-one-piece', { diameter: 120, width: 30, infill: 'spokes', tread: 'angled', treadAngle: 30, bore: { type: 'plain', diameter: 8 } }],
+  ['ribbed-segmented', { infill: 'solid', tread: 'ribbed' }],
+  // Curved cross-sections. These loft rather than extrude, which is minutes
+  // rather than seconds of engine time — and the only route to a crown, since
+  // no boolean will touch a solid with curved faces.
+  ['crowned-lugged', { diameter: 200, width: 40, infill: 'solid', tread: 'lugged', profile: { shape: 'crowned', crownDrop: 5 } }],
+  ['round-bike-tire', { diameter: 200, width: 28, infill: 'honeycomb', tread: 'chevron', treadAngle: 35, treadDepth: 2.2, profile: { shape: 'round' }, bore: { type: 'bolt', boltCount: 5, boltCircle: 60, boltHoleDia: 5, pilotDia: 12 } }],
+  ['crowned-ribbed', { diameter: 160, width: 36, infill: 'solid', tread: 'ribbed', profile: { shape: 'crowned' } }],
 ];
 
 const outRoot = join(process.cwd(), 'out', 'validate');

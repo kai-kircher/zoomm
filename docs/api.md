@@ -64,7 +64,9 @@ Response shape (abridged):
     { "label": "B", "count": 5, "ks": [1,2,3,4,5], "cutters": [ … ] }
   ],
   "infillInfo": { "style": "honeycomb", "cellsPerSegment": 34, "wall": 2.6, … },
-  "treadInfo":  { "style": "lugged", "lugsTotal": 54, "grooves": 0 },
+  "treadInfo":  { "style": "lugged", "crown": "flat", "bars": 54, "barsPerSegment": 9, "barWidth": 14.1 },
+  "profile":    { "shape": "flat", "crownDrop": 0, "crownRadius": 0, "shoulderR": 177.8 },
+  "sections":   [ { "z": 0, "kind": "sector", "segs": [ … ], "interior": [x, y] } ],
   "bbox": { "w": 178.5, "d": 146, "rotForPrint": 60 },
   "fit":  { "usable": {"x":210,"y":210,"z":250}, "wholeFits": false, "pieceFits": true },
   "glue": { "name": "…", "why": "…", "tips": "…" },
@@ -80,11 +82,20 @@ Geometry conventions:
 - The **canonical piece frame** puts the sector on `[0°, segAngle]` with the
   wheel centre at the origin. `bbox.rotForPrint` is the rotation that lays it
   out symmetric for printing.
-- `outline.segs` is a closed loop of `{kind:"line", a, b}` and
-  `{kind:"arc", a, b, center, radius, ccw}`; dovetail tenons and pockets are
-  part of it.
+- `sections` is the piece's boundary at one or more heights across the width,
+  each a closed loop of `{kind:"line", a, b}` and
+  `{kind:"arc", a, b, center, radius, ccw}` plus a region seed. Dovetail tenons
+  and pockets are part of it, and so are the tread bars — they are notches in
+  the outer boundary, not cutters. A flat wheel has exactly one section and is
+  extruded; anything that varies with height (a crown, slanted bars,
+  circumferential grooves on a crowned tread) has several and is lofted. All
+  sections of a piece are congruent — same entity count, same order.
+- `outline` is the widest section (mid-width), i.e. the piece's silhouette. Use
+  it for footprint and flat-view work; use `sections` to build the solid.
 - Each cutter is a prism: a profile (`circle` / `annulus` / `poly` / `path`)
-  plus a `z0`/`z1` range. Through-cutters overshoot the part by 1 mm each end.
+  plus a `z0`/`z1` range. Only cuts that stop partway through the width are
+  cutters now — everything full-depth is a loop in the section sketch. Cutters
+  that do span the width overshoot the part by 1 mm each end.
 
 `warnings` are things the caller should act on; `notes` are decisions the
 planner made. Both are plain strings, already user-readable.
@@ -171,8 +182,15 @@ named by `units` (`"mm"` default, `"in"` accepted and converted).
   "material": "petg",           // pla | petg | abs | tpu
   "infill": "spokes",           // solid | spokes | honeycomb | flexweb | lattice | auxetic | voronoi
   "spokeCount": 0,              // 0 = auto; snapped to a multiple of the segment count
-  "tread": "lugged",            // slick | ribbed | lugged | diamond
+  "tread": "lugged",            // slick | ribbed | lugged | diamond | chevron | angled
   "treadDepth": 3.5,            // 0.8 mm – 6 % of diameter
+  "treadCount": 0,              // bars around the wheel; 0 = auto, snapped to a multiple of N
+  "treadAngle": 25,             // bar slant off the axis, degrees (angled | chevron)
+  "ribCount": 0,                // circumferential grooves; 0 = auto
+  "profile": {
+    "shape": "flat",            // flat | crowned | round
+    "crownDrop": 0              // mm the radius falls to each shoulder; 0 = auto
+  },
   "bore": {
     "type": "keyed",            // plain | keyed | hex | dbore | bolt
     "diameter": 20, "keyWidth": 6, "keyDepth": 2.8,

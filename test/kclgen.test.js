@@ -72,10 +72,39 @@ test('segmented bolt pieces never subtract the pilot bore', () => {
   assert.ok(!pieceA.includes('subtract('), 'piece A has no subtract');
   assert.match(pieceA, /\npiece = blank\n/);
   const pieceB = files.find((f) => f.name === 'piece-B.kcl').content;
-  const subs = [...pieceB.matchAll(/subtract\(\[\w+\], tools = \[([^\]]*)\]\)/g)];
-  assert.equal(subs.length, 1, 'piece B has exactly one subtract');
-  assert.equal(subs[0][1].split(',').length, 1, 'piece B subtracts only its bolt hole');
-  assert.ok(!pieceB.includes('// cutter: bore'), 'no bore cutter emitted');
+  // Piece B's bolt hole runs the full width, so it is a loop in the profile
+  // sketch rather than a boolean — nothing here needs a subtract either.
+  assert.ok(!pieceB.includes('subtract('), 'piece B has no subtract');
+  assert.ok(!pieceB.includes('// cutter: '), 'no full-depth cut is emitted as a tool');
+  assert.match(pieceB, /sec1Sk = sketch[\s\S]*?\n {2}h1 = circle\(/, 'the bolt hole is a loop in the profile sketch');
+});
+
+test('full-depth cuts become sketch loops; only partial-depth ones stay tools', () => {
+  // A flat ribbed wheel is the one case left with a real boolean: the
+  // circumferential grooves do not run the full width.
+  const plan = planWheel({ tread: 'ribbed', infill: 'spokes' });
+  const kcl = generateKcl(plan).find((f) => f.name === 'piece-A.kcl').content;
+  const tools = [...kcl.matchAll(/\/\/ cutter: (\S+)/g)].map((m) => m[1]);
+  assert.ok(tools.length > 0 && tools.every((t) => t.startsWith('groove')), `only grooves stay tools, got ${tools}`);
+  assert.ok(!kcl.includes('// cutter: bore'), 'the bore is a profile loop');
+  // The old emitter opened a sketch per cutter; now there is one per section.
+  assert.equal([...kcl.matchAll(/= sketch\(on = /g)].length, plan.sections.length + tools.length);
+});
+
+test('a crowned piece lofts through its sections instead of extruding', () => {
+  const plan = planWheel({ tread: 'lugged', profile: { shape: 'crowned', crownDrop: 5 } });
+  const kcl = generateKcl(plan).find((f) => f.name === 'piece-A.kcl').content;
+  assert.ok(!kcl.includes('extrude('), 'a crowned piece is never extruded');
+  const loft = kcl.match(/blank = loft\(\[([^\]]*)\]\)/);
+  assert.ok(loft, 'blank comes from a loft');
+  assert.equal(loft[1].split(',').length, plan.sections.length);
+  for (let i = 0; i < plan.sections.length; i++) {
+    const z = plan.sections[i].z;
+    assert.ok(
+      kcl.includes(z === 0 ? 'sketch(on = XY)' : `offsetPlane(XY, offset = ${z})`),
+      `section at z=${z} sits on its own plane`
+    );
+  }
 });
 
 test('every emitted arc has endpoints equidistant from its center', () => {

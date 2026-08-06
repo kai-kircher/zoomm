@@ -19,8 +19,13 @@ and the glue-up instructions.
 
 ## What it does
 
-- **Configure the wheel**: diameter, width, material (PLA/PETG/ABS/TPU), tread (lugged / ribbed /
-  diamond / slick), and hub interface (keyed shaft, plain, hex, D-bore, or bolt circle with pilot).
+- **Configure the wheel**: diameter, width, material (PLA/PETG/ABS/TPU), and hub interface (keyed
+  shaft, plain, hex, D-bore, or bolt circle with pilot).
+- **Pick a tread**: lugged (straight bars), angled, chevron / V-bar, ribbed, diamond, or slick —
+  with bar count, bar angle, rib count and depth all settable.
+- **Pick a cross-section**: flat cylindrical, crowned by a settable drop, or a full round
+  bicycle-tire section. The tread rides the curve, so bars fade out towards the shoulders the way
+  a moulded tire's do.
 - **Pick a web**: solid, spokes, or one of the four [airless patterns](#the-airless-webs) —
   honeycomb, interlaced lattice, auxetic re-entrant, or voronoi. Each carries its own parameter
   group (cell size, wall, orientation, corner rounding…) and each guarantees a minimum wall
@@ -66,8 +71,8 @@ download the KCL bundle and run `zoo kcl export --output-format=stl piece-A.kcl 
 export from Design Studio.
 
 ```sh
-npm test           # 105 unit tests: chunking math, joints, dedupe, piece profiles, every web pattern's wall and overlap guarantees, KCL well-formedness
-npm run validate:kcl   # regenerates a 13-config matrix; round-trips through Zoo's engine when a token is set
+npm test           # 115 unit tests: chunking math, joints, dedupe, piece profiles, every web pattern's wall and overlap guarantees, KCL well-formedness
+npm run validate:kcl   # regenerates a 19-config matrix; round-trips through Zoo's engine when a token is set
 ```
 
 ## Documentation
@@ -90,8 +95,9 @@ npm run validate:kcl   # regenerates a 13-config matrix; round-trips through Zoo
                       ├─ web layout (spokes, flex-web slots, or a honeycomb /
                       │  lattice / auxetic / voronoi cell pattern), kept clear
                       │  of seam keep-outs so joints stay solid
-                      ├─ tread cutters (circumferential groove rings, axial lug slots —
-                      │  pattern counts snap to multiples of N so seams land between features)
+                      ├─ tread + tire cross-section (bar notches and the crown arc are
+                      │  drawn into the piece profile itself, one profile per z level;
+                      │  counts snap to multiples of N so seams land between bars)
                       └─ per-piece hub features + signature dedupe (keyway/D-flat/bolt windows)
                       │
         ┌─────────────┴──────────────┐
@@ -192,7 +198,7 @@ clearance, and the wall actually left between them.
 | `orientation` | `radial` | `radial` points a cell vertex at the rim; `tangential` turns the whole lattice 30° so a flat faces it. |
 | `cellShape` | `hex` | `round` replaces each hex with its inscribed circle — same lattice, same walls, no stress-raising corners. |
 | `cornerRadius` | `0` (sharp) | Fillets the hex corners. Capped at half the across-flats width, where the cell becomes `round`. |
-| `maxCells` | `64` | Per-segment cell budget. Cells are grown until they fit it, keeping the KCL (and the boolean count) sane. |
+| `maxCells` | `64` | Per-segment cell budget. Cells are grown until they fit it, keeping the KCL sane. |
 
 ### Interlaced lattice
 
@@ -242,6 +248,47 @@ ask for cells too big for the web band and it leaves the web solid rather than h
 rim. Segmented wheels keep every cell clear of the seam keep-outs, so the joints stay solid — on a
 narrow wedge near the hub that can mean a ring or two is left solid, and the notes say which.
 
+## Tread and tire cross-section
+
+The tread is not cut into the wheel — it *is* the wheel's outer boundary. Bars are described by
+the windows between them, notched straight into the piece profile, so a lugged wheel costs the
+engine no more than a slick one.
+
+| `tread` | What |
+|---|---|
+| `slick` | Smooth. |
+| `lugged` | Straight transverse bars. |
+| `angled` | Bars slanted across the width by `treadAngle`. |
+| `chevron` | Bars angling in from both shoulders to meet at the centreline. |
+| `ribbed` | Circumferential grooves. |
+| `diamond` | Bars and grooves together. |
+
+| Parameter | Default | What |
+|---|---|---|
+| `treadDepth` | `3.5` mm | How deep the bars and grooves cut, measured from the tread surface. |
+| `treadCount` | `0` (auto) | Bars around the whole wheel, snapped to a multiple of the segment count. Auto works out to roughly one bar every 20 mm of circumference. |
+| `treadAngle` | `25`° | Bar slant off the wheel's axis (`angled`, `chevron`). See below. |
+| `ribCount` | `0` (auto) | Circumferential grooves across the width. Auto is one per 14 mm. |
+
+A bar can only lean as far as its own pitch cell allows before neighbouring bars merge. When
+`treadCount` is on auto the planner honours the angle you asked for and **spaces the bars out**
+until it fits — 45° on the demo wheel gives 12 bars where a straight tread gives 54. Pin
+`treadCount` yourself and the angle gives way instead, with a note telling you what it settled
+on.
+
+### The cross-section
+
+| `profile.shape` | What |
+|---|---|
+| `flat` | A cylindrical tread — the profile this planner has always made. Single extrude, seconds to export. |
+| `crowned` | The radius falls by `profile.crownDrop` from mid-width to each shoulder, on a circular arc. Auto drop is 12% of the width. |
+| `round` | The drop equals the half-width, so the section is a true semicircle: a bicycle tire. |
+
+The crown is applied before the tread, and the bar floors ride it, so bars stand proud at the
+centreline and fade out towards the shoulders exactly as a moulded tire's do. The drop is capped
+so a rim band and a web always survive underneath it; ask for more and you get a warning and the
+deepest section the wheel can actually give up.
+
 ## Adhesive guidance (the flexible-glue question)
 
 The app recommends per material, and bakes it into the generated `ASSEMBLY.md`:
@@ -265,26 +312,55 @@ for the engine:
 ```kcl
 @settings(defaultLengthUnit = mm, kclVersion = 1.0)
 
-outlineSk = sketch(on = XY) {
-  e1 = line(start = [9.2, 0], end = [16.346, 0])
+sec1Sk = sketch(on = XY) {
+  e1 = line(start = [9.2, 0], end = [16.346, 0])     // dovetail pocket, face 0
   ...
-  e10 = arc(start = [177.8, 0], end = [88.9, 153.9793], center = [0, 0])
+  e10 = arc(start = [177.8, 0], end = [177.664, 6.965], center = [0, 0])   // tread
+  e11 = line(start = [177.664, 6.965], end = [174.166, 6.828])             // bar wall
+  e12 = arc(start = [174.166, 6.828], end = [173.781, 13.437], center = [0, 0])
   ...
+  h1 = circle(start = [10.2, 0], center = [0, 0])    // bore — a loop, not a tool
+  h2_1 = line(...)                                   // keyway
+  h3_1 = line(...)                                   // web void
 }
-blank = extrude(region(point = [86.9983, 50.2285], sketch = outlineSk), length = 50)
-
-cut1Sk = sketch(on = offsetPlane(XY, offset = -1)) {
-  c1 = circle(start = [10.2, 0], center = [0, 0])
-}
-cut1 = extrude(region(segments = [cut1Sk.c1]), length = 52)
-...
-piece = subtract([blank], tools = [cut1, cut2, ...])
+sec1 = region(point = [147.099, 84.928], sketch = sec1Sk)
+blank = extrude(sec1, length = 50)
+piece = blank
 ```
+
+**Booleans are the scarce resource, not entities.** Zoo's engine slows down and then gets
+unreliable as the tool list grows — the demo wheel's twelve cutters took ~80 s, and busier wheels
+came back `Batch edit result is not valid` or dropped the modeling connection outright. So every
+cut that runs the full depth of the piece — bore, keyway, bolt holes, every web void, every tread
+bar — is just another **loop in the same sketch**, and `region()` resolves the material face
+between them in one pass. Same wheel, same 500-triangle solid, **3 s instead of 80 s**. The only
+tools left are cuts that genuinely stop partway through the width (circumferential grooves on a
+flat tread), and those are emitted as sector wedges rather than full rings — subtracting a 360°
+ring from a 60° sector is a sliver boolean, and that one used to hang the engine past five
+minutes on a plain ribbed wheel.
+
+A crowned or round cross-section is `loft`ed through one such sketch per z level instead of
+extruded:
+
+```kcl
+sec1 = region(point = [...], sketch = sec1Sk)   // z = 0,  shoulder radius
+sec3 = region(point = [...], sketch = sec3Sk)   // z = W/2, full radius
+...
+blank = loft([sec1, sec2, sec3, sec4, sec5])
+```
+
+That is forced, not stylistic: the engine refuses any boolean whose operands carry curved faces
+(`cannot handle this 3D subtraction yet` — for revolved *and* lofted tools alike, and for
+`intersect` too), so a crown can never be cut in. It has to be in the profile from the start.
+Lofting costs real engine time — minutes per piece rather than seconds — which is why flat wheels
+keep the single-extrude fast path.
 
 Cutters overshoot the part in Z, boolean tool batches are bounded, and arcs are emitted
 start/end/center in CCW order per the KCL spec — with their endpoints snapped onto a common
 radius, because an arc whose endpoints disagree by a micron is rejected by the engine as a bad
 *region query point* ([WW-3](docs/zoo-api-notes.md#ww-3--a-1-µm-arc-inconsistency-is-reported-as-a-bad-region-query-point)).
+Coordinates print at six decimals for the same reason: a tread bar puts fifty-odd arcs on one rim
+loop, and a loop is only as closed as its worst entity.
 
 ## API
 
@@ -325,14 +401,28 @@ test/                   node:test suite
 - Wheel width taller than the printer Z is warned, not yet auto-split axially.
 - Tread/tenon edges are sharp (no chamfered lead-ins yet); slicers' seam-aware placement and a
   light file fix the first-fit experience.
-- Preview approximates tread visually; the KCL carries the exact cuts.
-- **Engine export is not yet reliable enough to be the only route.** In a 13-configuration
-  live run on engine 0.2.186 (2026-08-05), 5 configs exported, 3 hung with no output until our
-  300 s timeout, and 5 returned engine errors — one of which was ours and is now fixed. Runtime
-  doesn't track model size either: we measured a 12-entity file at 417 s and a 69-cutter wheel
-  at 85 s. Every measurement, repro and suggested fix is in
-  [docs/zoo-api-notes.md](docs/zoo-api-notes.md); the KCL download and Design Studio remain the
-  dependable path, which is why they're first-class in the UI.
+- The preview draws tread bars and the crown exactly (both are in the piece profile, and crowned
+  pieces are lofted in the preview too). Circumferential grooves are still an overlay; the KCL
+  subtracts them for real.
+- Crowned and round cross-sections take minutes per piece to export, against seconds for a flat
+  one — lofted surfaces are simply much more work for the engine than extruded ones. The STL
+  export budget allows for it; the configurator says so before you click.
+- A bar can only lean as far as its own pitch cell allows. Ask for a steep chevron and the
+  planner spaces the bars out to grant it; pin the bar count as well and the angle gives way
+  instead, with a note saying so.
+- Circumferential grooves on a crowned tread are modelled into the section curve, so they come
+  out round-shouldered rather than square, and the count is capped at two (each groove costs
+  three more profiles to loft through).
+- **Engine export is not yet reliable enough to be the only route.** Two of the failure modes we
+  hit were ours and are fixed — the arc-endpoint inconsistency (WW-3) and the boolean count,
+  which is why full-depth cuts stopped being tools at all. That took the live matrix from 5/13 to
+  **14/19**, and no remaining failure is a geometry error: they are all `Modeling command timed
+  out` or `websocket closed early`, and **every one of them has since exported unchanged when
+  re-run** (the round bike tire: ✗ in the batch, ✓ 146 s alone). Runtime doesn't track model size
+  either — we measured a 12-entity file at 417 s and a 69-cutter wheel at 85 s, and one file that
+  exported in 70 s hung past 900 s an hour later. Every measurement, repro and suggested fix is
+  in [docs/zoo-api-notes.md](docs/zoo-api-notes.md); the KCL download and Design Studio remain
+  the dependable path, which is why they're first-class in the UI.
 - Wishlist: Text-to-CAD hub-cap emblems ("a snarling wolf, embossed"), mass/inertia estimates
   via Zoo's file API, chamfered joint lead-ins, per-piece print-time estimates.
 

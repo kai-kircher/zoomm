@@ -40,8 +40,15 @@ export const DEFAULTS = Object.freeze({
   material: 'petg', // pla | petg | abs | tpu
   infill: 'spokes', // solid | spokes | honeycomb | flexweb | lattice | auxetic | voronoi
   spokeCount: 0, // 0 = auto
-  tread: 'lugged', // slick | ribbed | lugged | diamond
+  tread: 'lugged', // slick | ribbed | lugged | diamond | chevron | angled
   treadDepth: 3.5,
+  treadCount: 0, // bars around the wheel; 0 = auto from the circumference
+  treadAngle: 25, // bar slant off the axis, degrees (angled | chevron)
+  ribCount: 0, // circumferential grooves (ribbed | diamond); 0 = auto
+  profile: {
+    shape: 'flat', // flat | crowned | round
+    crownDrop: 0, // mm the tread radius falls from mid-width to each shoulder; 0 = auto
+  },
   bore: {
     type: 'keyed', // plain | keyed | hex | dbore | bolt
     diameter: 20,
@@ -93,6 +100,7 @@ export const LENGTH_FIELDS = [
   ['diameter'],
   ['width'],
   ['treadDepth'],
+  ['profile', 'crownDrop'],
   ['bore', 'diameter'],
   ['bore', 'keyWidth'],
   ['bore', 'keyDepth'],
@@ -138,6 +146,7 @@ export function normalizeParams(input = {}) {
     lattice: { ...structuredClone(DEFAULTS.lattice), ...structuredClone(input.lattice || {}) },
     auxetic: { ...structuredClone(DEFAULTS.auxetic), ...structuredClone(input.auxetic || {}) },
     voronoi: { ...structuredClone(DEFAULTS.voronoi), ...structuredClone(input.voronoi || {}) },
+    profile: { ...structuredClone(DEFAULTS.profile), ...structuredClone(input.profile || {}) },
     printer: { ...structuredClone(DEFAULTS.printer), ...structuredClone(input.printer || {}) },
     joint: { ...structuredClone(DEFAULTS.joint), ...structuredClone(input.joint || {}) },
   };
@@ -149,6 +158,9 @@ export function normalizeParams(input = {}) {
   }
   p.spokeCount = Math.max(0, Math.round(Number(p.spokeCount) || 0));
   p.segmentsOverride = Math.max(0, Math.round(Number(p.segmentsOverride) || 0));
+  p.treadCount = clamp(Math.round(Number(p.treadCount) || 0), 0, 200);
+  p.ribCount = clamp(Math.round(Number(p.ribCount) || 0), 0, 12);
+  p.treadAngle = clamp(Number(p.treadAngle) || 0, 0, 60);
   p.bore.boltCount = clamp(Math.round(Number(p.bore.boltCount) || 4), 2, 12);
   p.honeycomb.maxCells = clamp(Math.round(Number(p.honeycomb.maxCells) || DEFAULTS.honeycomb.maxCells), 8, 240);
   p.lattice.rows = clamp(Math.round(Number(p.lattice.rows) || 0), 0, 6);
@@ -177,7 +189,9 @@ export function normalizeParams(input = {}) {
 
   if (!['pla', 'petg', 'abs', 'tpu'].includes(p.material)) p.material = 'petg';
   if (!WEB_STYLES.includes(p.infill)) p.infill = 'spokes';
-  if (!['slick', 'ribbed', 'lugged', 'diamond'].includes(p.tread)) p.tread = 'lugged';
+  if (!['slick', 'ribbed', 'lugged', 'diamond', 'chevron', 'angled'].includes(p.tread)) p.tread = 'lugged';
+  if (!['flat', 'crowned', 'round'].includes(p.profile.shape)) p.profile.shape = 'flat';
+  p.profile.crownDrop = Math.max(0, p.profile.crownDrop);
   if (!['plain', 'keyed', 'hex', 'dbore', 'bolt'].includes(p.bore.type)) p.bore.type = 'plain';
   if (!['radial', 'tangential'].includes(p.honeycomb.orientation)) p.honeycomb.orientation = 'radial';
   if (!['hex', 'round'].includes(p.honeycomb.cellShape)) p.honeycomb.cellShape = 'hex';
@@ -527,9 +541,44 @@ export function planWheel(input = {}) {
 
   const R = p.diameter / 2;
   const W = p.width;
-  const treadEff = p.tread === 'slick' ? 0 : p.treadDepth;
+  const halfW = W / 2;
+  const BARRED = ['lugged', 'diamond', 'chevron', 'angled'];
+  const barred = BARRED.includes(p.tread);
+  const ribbed = ['ribbed', 'diamond'].includes(p.tread);
+  const treadCut = p.tread === 'slick' ? 0 : p.treadDepth;
+
+  // -------------------------------------------------------------------------
+  // Tire cross-section (the crown)
+  // -------------------------------------------------------------------------
+  // The tread's outer radius across the width follows a circular arc that
+  // falls `crownDrop` from the mid-width peak to each shoulder:
+  //   flat    — no fall; the cylindrical rim this planner has always made
+  //   crowned — a settable fall, like a car tire's shouldered section
+  //   round   — the fall equals the half-width, so the section is a true
+  //             semicircle: a bicycle tire.
+  // Everything on the tread rides this curve, bar floors included, so a
+  // crowned wheel's bars fade out towards the shoulders the way a moulded
+  // tire's do. It has to be built into the piece's own profile rather than
+  // cut with a tool: Zoo's engine refuses any boolean whose operands carry
+  // curved faces ("cannot handle this 3D subtraction yet"), so a revolved or
+  // lofted cutter is not an option — see the loft in kclgen.js.
+  const crownWanted = p.profile.shape === 'round' ? halfW : p.profile.shape === 'crowned' ? (p.profile.crownDrop > 0 ? p.profile.crownDrop : clamp(W * 0.12, 1, halfW)) : 0;
+  // The crown eats radius before the tread does, so it has to leave a rim
+  // band and a web behind it.
+  const crownDrop = rnd(clamp(crownWanted, 0, Math.max(0, Math.min(halfW, R * 0.3 - treadCut))), 3);
+  if (crownWanted - crownDrop > 0.05) {
+    warnings.push(
+      `${p.profile.shape === 'round' ? 'A round (semicircular) section' : 'The requested crown'} would have taken ${rnd(crownWanted, 1)} mm off the shoulder radius — more than this wheel can give up; flattened to ${rnd(crownDrop, 1)} mm.`
+    );
+  }
+  // Section arc through the mid-width peak and the two shoulders: half-width
+  // h, sagitta d ⇒ radius (h² + d²)/2d. `round` gives d = h and hence ρ = h.
+  const crownRadius = crownDrop > 0 ? (halfW ** 2 + crownDrop ** 2) / (2 * crownDrop) : 0;
+  const crownAt = (z) =>
+    crownDrop > 0 ? R - crownRadius + Math.sqrt(Math.max(0, crownRadius ** 2 - (z - halfW) ** 2)) : R;
 
   // Radial bands: [bore .. hub ring .. web (infill) .. rim ring .. tread .. R]
+  const treadEff = crownDrop + treadCut;
   const rimBandT = clamp(R * 0.05, 6, 14);
   const rRimIn = R - treadEff - rimBandT;
 
@@ -821,13 +870,186 @@ export function planWheel(input = {}) {
   }
 
   // -------------------------------------------------------------------------
-  // Outline (canonical piece frame: sector spans [0°, A°])
+  // Tread pattern
   // -------------------------------------------------------------------------
+  // Bars are described by the *windows* between them — the notches cut into
+  // the crown arc — because that is what the piece profile has to carry.
+  // Material left between neighbouring windows is the bar itself. Drawing
+  // them into the profile instead of subtracting a prism per bar is what
+  // makes a lugged wheel exportable: the old one-boolean-per-lug scheme took
+  // ~80 s on the demo wheel and fell over ("Batch edit result is not valid",
+  // engine hangups) on anything busier.
+  const treadInfo = { style: p.tread, crown: p.profile.shape };
+
+  // Circumferential grooves. On a flat profile they stay prismatic cutters —
+  // cheap, and sharp-shouldered. On a crowned one nothing may be subtracted
+  // from the piece at all (the loft leaves it with curved faces, which the
+  // engine's booleans reject outright), so they are rolled into the section
+  // radius instead and come out with rounded shoulders — which is what a
+  // moulded tire's rain grooves look like anyway.
+  const ribDepth = ribbed ? p.treadDepth * 0.85 : 0;
+  const ribHalfW = 1.2;
+  const ribZ = [];
+  if (ribbed) {
+    const gMax = crownDrop > 0 ? 2 : 6; // a crowned groove costs three z levels
+    const g = clamp(p.ribCount > 0 ? p.ribCount : Math.round(W / 14), 1, gMax);
+    if (p.ribCount > 0 && g !== p.ribCount) {
+      notes.push(
+        crownDrop > 0
+          ? `Rib count reduced ${p.ribCount} → ${g}; on a crowned profile each groove is modelled into the section curve, and more would make the export crawl.`
+          : `Rib count reduced ${p.ribCount} → ${g} to keep the grooves clear of the wheel's edges.`
+      );
+    }
+    const edge = clamp(W * 0.12, 3, 10);
+    for (let i = 0; i < g; i++) ribZ.push(rnd(g === 1 ? halfW : edge + (i * (W - 2 * edge)) / (g - 1), 4));
+    treadInfo.ribs = g;
+    treadInfo.ribDepth = rnd(ribDepth, 2);
+  }
+  // Groove depth at height z, for the crowned case only — a parabolic dip so
+  // the three levels each groove contributes land on a consistent curve.
+  const ribDropAt = (z) => {
+    if (!(crownDrop > 0) || !ribZ.length) return 0;
+    let d = 0;
+    for (const zc of ribZ) {
+      const t = Math.abs(z - zc) / ribHalfW;
+      if (t < 1) d = Math.max(d, ribDepth * (1 - t * t));
+    }
+    return d;
+  };
+
+  let barCount = 0;
+  let barsPerSeg = 0;
+  let barHalf = 0; // angular half-width of one window, degrees
+  let barPitch = 0; // degrees between window centres
+  let barShift = 0; // degrees the window centre travels over a half-width
+  if (barred && treadCut > 0) {
+    // Slant the user asked for, as degrees of rotation across a half-width.
+    const wantShift = ['angled', 'chevron'].includes(p.tread) && p.treadAngle > 0 ? r2d((Math.tan(d2r(p.treadAngle)) * halfW) / R) : 0;
+    // Window half-width and the room a bar has to lean, for a given count.
+    const slotFor = (cnt) => clamp(((Math.PI * p.diameter) / cnt) * 0.32, 2.5, 8);
+    // The window is widest in angle at the smallest radius it reaches.
+    const halfFor = (cnt) => r2d(Math.asin(clamp(slotFor(cnt) / 2 / Math.max(R - crownDrop - treadCut, 1), 0, 1)));
+    const roomFor = (cnt) => (360 / cnt) * 0.45 - halfFor(cnt);
+    // How far a window centre actually strays from its nominal angle. An
+    // angled bar leans one way across the whole width; a chevron's two arms
+    // each cover half of it, so the same bar angle costs half the excursion.
+    const strayOf = (shift) => (p.tread === 'chevron' ? shift * 0.5 : shift);
+
+    barCount = p.treadCount > 0 ? p.treadCount : Math.max(N, Math.round((Math.PI * p.diameter) / 20));
+    if (N > 1) barCount = Math.max(N, Math.round(barCount / N) * N);
+    if (p.treadCount > 0 && barCount !== p.treadCount) {
+      notes.push(`Tread bar count adjusted ${p.treadCount} → ${barCount} so the pattern repeats per segment.`);
+    }
+    if (wantShift > 0 && p.treadCount === 0) {
+      // A bar can only lean as far as its own pitch cell allows. Rather than
+      // keep the count and flatten the tread to nothing, an auto count spaces
+      // the bars out until the angle the user asked for actually fits.
+      const step = N > 1 ? N : 1;
+      const floorCount = Math.max(N, step, 4);
+      while (barCount - step >= floorCount && strayOf(wantShift) > roomFor(barCount)) barCount -= step;
+    }
+    barPitch = 360 / barCount;
+    barHalf = halfFor(barCount);
+    barsPerSeg = N === 1 ? barCount : barCount / N;
+    if (wantShift > 0) {
+      barShift = wantShift;
+      // A window may never leave its own pitch cell. Bars would otherwise
+      // merge — and, just as fatally, the sections would stop matching one
+      // another, which is exactly what the loft needs to raise a surface
+      // between them.
+      const maxShift = Math.max(0, roomFor(barCount) / (strayOf(1) || 1));
+      if (barShift > maxShift + 1e-9) {
+        barShift = maxShift;
+        const got = barShift > 0 ? rnd(r2d(Math.atan((d2r(barShift) * R) / halfW)), 1) : 0;
+        notes.push(`Tread angle reduced ${rnd(p.treadAngle, 1)}° → ${got}° — a steeper slant would run the bars into each other at ${barCount} bars.`);
+      }
+    }
+    treadInfo.bars = barCount;
+    treadInfo.barsPerSegment = barsPerSeg;
+    treadInfo.barWidth = rnd((Math.PI * p.diameter) / barCount - slotFor(barCount), 1);
+    if (barShift) treadInfo.barAngle = rnd(r2d(Math.atan((d2r(barShift) * R) / halfW)), 1);
+  }
+  // Window centre offset at height z. `barShift` is the tangential travel of
+  // one bar across a half-width, so an angled bar sweeps ±barShift over the
+  // full width while a chevron sweeps that much per arm — leading at the
+  // centreline, trailing at both shoulders.
+  const barPhase = (z) => {
+    if (!barShift) return 0;
+    const u = (2 * z) / W - 1;
+    return p.tread === 'chevron' ? barShift * (0.5 - Math.abs(u)) : barShift * u;
+  };
+
+  // -------------------------------------------------------------------------
+  // Sections (canonical piece frame: sector spans [0°, A°])
+  // -------------------------------------------------------------------------
+  // One z level extrudes; several loft. Levels are only added when the outer
+  // boundary actually varies with height, because each one is another surface
+  // the engine has to fit and that dominates export time.
+  const crowned = crownDrop > 0;
+  const zSet = new Set([0, W]);
+  if (crowned && ribZ.length) {
+    // The grooves' own levels already sample the crown right across the
+    // width, so skip the uniform pass and just pin the mid-width peak.
+    zSet.add(rnd(halfW, 4));
+    for (const zc of ribZ) for (const dz of [-ribHalfW, 0, ribHalfW]) zSet.add(rnd(clamp(zc + dz, 0, W), 4));
+  } else if (crowned) {
+    const steps = p.profile.shape === 'round' ? 6 : 4;
+    for (let i = 1; i < steps; i++) zSet.add(rnd((W * i) / steps, 4));
+  }
+  if (barShift && p.tread === 'chevron') zSet.add(rnd(halfW, 4));
+  const zLevels = crowned || barShift ? [...zSet].sort((x, y) => x - y) : [0];
+
+  // Outer boundary of one section, walking CCW from `from` to `to` degrees.
+  // Windows never reach either end (see the maxShift clamp above), so the
+  // boundary always starts and ends on the crown radius and the sector faces
+  // can meet it without knowing anything about the tread.
+  const outerAt = (z, from, to) => {
+    const Ro = crownAt(z) - ribDropAt(z);
+    const Ri = Ro - treadCut;
+    const segs = [];
+    const ph = barPhase(z);
+    // A zero-sweep arc is a degenerate entity the engine rejects, and the ring
+    // case opens exactly on a window edge, so every arc is length-checked.
+    const arcTo = (r, a0, a1) => {
+      if (a1 - a0 > 1e-7) segs.push({ kind: 'arc', a: polar(r, a0), b: polar(r, a1), center: [0, 0], radius: rnd(r), ccw: true });
+    };
+    let a = from;
+    if (barCount) {
+      const j0 = Math.ceil((from - ph) / barPitch - 0.5);
+      const j1 = Math.floor((to - ph) / barPitch - 0.5);
+      for (let j = j0; j <= j1; j++) {
+        const c = ph + (j + 0.5) * barPitch;
+        const a0 = Math.max(c - barHalf, a);
+        const a1 = Math.min(c + barHalf, to);
+        if (a1 - a0 < 1e-6) continue;
+        arcTo(Ro, a, a0);
+        segs.push({ kind: 'line', a: polar(Ro, a0), b: polar(Ri, a0) });
+        arcTo(Ri, a0, a1);
+        segs.push({ kind: 'line', a: polar(Ri, a1), b: polar(Ro, a1) });
+        a = a1;
+      }
+    }
+    arcTo(Ro, a, to);
+    return segs.map((s) => ({ ...s, a: s.a.map((v) => rnd(v)), b: s.b.map((v) => rnd(v)) }));
+  };
+
+  // A point solid in every section: the rim band, under the deepest tread
+  // valley any section reaches and over the web. The region seed has to hold
+  // for all of them — the sketch now carries the bore and every web void as
+  // loops, so a seed that lands in a void resolves to the wrong face.
+  const seedPt = polar(rRimIn + rimBandT / 2, N === 1 ? 90 : A / 2);
+
   const jc = p.joint.clearance;
-  let outline;
-  if (N === 1) {
-    outline = { kind: 'circle', r: rnd(R) };
-  } else {
+  const sectionAt = (z) => {
+    if (N === 1) {
+      if (!barCount) return { z: rnd(z, 4), kind: 'circle', r: rnd(crownAt(z) - ribDropAt(z)), interior: seedPt.map((v) => rnd(v)) };
+      // Start the ring on the first window's leading edge so the wrap-around
+      // gap is one ordinary arc — a full-turn arc with coincident ends is
+      // degenerate and the engine rejects it.
+      const start = barPhase(z) + 0.5 * barPitch - barHalf;
+      return { z: rnd(z, 4), kind: 'ring', segs: outerAt(z, start, start + 360), interior: seedPt.map((v) => rnd(v)) };
+    }
+    const Ro = crownAt(z) - ribDropAt(z);
     const segs = [];
     const asc = [...joints];
     const desc = [...joints].reverse();
@@ -847,13 +1069,14 @@ export function planWheel(input = {}) {
       segs.push({ kind: 'line', a: h2, b: n2 });
       P = n2;
     }
-    segs.push({ kind: 'line', a: P, b: [R, 0] });
-    // Outer arc, CCW 0 → A.
-    segs.push({ kind: 'arc', a: [R, 0], b: polar(R, A), center: [0, 0], radius: R, ccw: true });
+    segs.push({ kind: 'line', a: P, b: [rnd(Ro), 0] });
+    // Outer boundary, CCW 0 → A: the crown arc for this height with the tread
+    // windows notched into it.
+    segs.push(...outerAt(z, 0, A));
     // Face A (male tenons), walking inward.
     const u = [Math.cos(d2r(A)), Math.sin(d2r(A))];
     const t = [-Math.sin(d2r(A)), Math.cos(d2r(A))]; // out of the piece
-    P = polar(R, A);
+    P = polar(Ro, A).map((v) => rnd(v));
     for (const j of desc) {
       const n2 = [j.r + j.hn, 0];
       const h2 = [j.r + j.hh, j.d];
@@ -873,8 +1096,13 @@ export function planWheel(input = {}) {
     segs.push({ kind: 'line', a: P, b: polar(rInner, A) });
     // Inner arc, drawn A → 0 (clockwise as walked).
     segs.push({ kind: 'arc', a: polar(rInner, A), b: [rInner, 0], center: [0, 0], radius: rInner, ccw: false });
-    outline = { kind: 'sector', segs, interior: polar((rHub + R) / 2, A / 2) };
-  }
+    return { z: rnd(z, 4), kind: 'sector', segs, interior: seedPt.map((v) => rnd(v)) };
+  };
+
+  const sections = zLevels.map(sectionAt);
+  // The mid-width section is the widest one: it is the piece's silhouette, so
+  // it drives the print footprint and everything the preview draws flat.
+  const outline = sections.reduce((best, s) => (Math.abs(s.z - halfW) < Math.abs(best.z - halfW) ? s : best), sections[0]);
 
   // Angular keep-out from each radial face, at a given radius.
   const faceMarginAng = (r) => (N === 1 ? 0 : r2d((jointOutN + 2.5) / Math.max(r, 1)));
@@ -1565,52 +1793,41 @@ export function planWheel(input = {}) {
     infillInfo = { style: 'solid' };
   }
 
-  // Tread cutters.
-  const treadInfo = { style: p.tread };
-  if (p.tread === 'ribbed' || p.tread === 'diamond') {
-    const g = clamp(Math.round(W / 14), 2, 6);
-    const gw = 2.4;
-    const edge = clamp(W * 0.12, 3, 10);
-    for (let i = 0; i < g; i++) {
-      const zc = g === 1 ? W / 2 : edge + (i * (W - 2 * edge)) / (g - 1);
-      shared.push({
+  // Tread. The bars live in the section profiles (see outerAt above) and cost
+  // nothing to build. Circumferential grooves on a *flat* profile are the one
+  // tread feature that still needs a cutter — and it is deliberately a wedge
+  // spanning just this piece, not a full ring: subtracting a 360° ring from a
+  // 60° sector is a sliver boolean, and that is what used to hang the engine
+  // past its five-minute budget on a plain ribbed wheel.
+  if (ribbed && !crowned) {
+    const pad = N === 1 ? 0 : r2d(2 / Math.max(rRimIn, 1));
+    for (let i = 0; i < ribZ.length; i++) {
+      const zc = ribZ[i];
+      const g = {
         id: `groove${i + 1}`,
-        shape: 'annulus',
-        rIn: rnd(R - p.treadDepth * 0.85),
+        rIn: rnd(R - ribDepth),
         rOut: rnd(R + 2),
-        z0: rnd(zc - gw / 2),
-        z1: rnd(zc + gw / 2),
-      });
+        z0: rnd(zc - ribHalfW),
+        z1: rnd(zc + ribHalfW),
+      };
+      if (N === 1) {
+        shared.push({ ...g, shape: 'annulus' });
+      } else {
+        const a0 = -pad;
+        const a1 = A + pad;
+        shared.push({
+          ...g,
+          shape: 'path',
+          segs: [
+            { kind: 'line', a: polar(g.rIn, a0), b: polar(g.rOut, a0) },
+            { kind: 'arc', a: polar(g.rOut, a0), b: polar(g.rOut, a1), center: [0, 0], radius: g.rOut, ccw: true },
+            { kind: 'line', a: polar(g.rOut, a1), b: polar(g.rIn, a1) },
+            { kind: 'arc', a: polar(g.rIn, a1), b: polar(g.rIn, a0), center: [0, 0], radius: g.rIn, ccw: false },
+          ].map((s) => ({ ...s, a: s.a.map((v) => rnd(v)), b: s.b.map((v) => rnd(v)) })),
+          interior: polar((g.rIn + R) / 2, A / 2).map((v) => rnd(v)),
+        });
+      }
     }
-    treadInfo.grooves = g;
-  }
-  if (p.tread === 'lugged' || p.tread === 'diamond') {
-    let count = Math.max(N, Math.round((Math.PI * p.diameter) / 20));
-    if (N > 1) count = Math.max(N, Math.round(count / N) * N);
-    const pitchLen = (Math.PI * p.diameter) / count;
-    const slotW = clamp(pitchLen * 0.32, 2.5, 8);
-    const perSeg = N === 1 ? count : count / N;
-    for (let j = 0; j < perSeg; j++) {
-      const ang = ((j + 0.5) * 360) / count;
-      const u = [Math.cos(d2r(ang)), Math.sin(d2r(ang))];
-      const t = [-Math.sin(d2r(ang)), Math.cos(d2r(ang))];
-      const r0 = R - p.treadDepth;
-      const r1 = R + 2;
-      const hwS = slotW / 2;
-      shared.push({
-        id: `lug${j + 1}`,
-        shape: 'poly',
-        pts: [
-          [r0 * u[0] - hwS * t[0], r0 * u[1] - hwS * t[1]],
-          [r1 * u[0] - hwS * t[0], r1 * u[1] - hwS * t[1]],
-          [r1 * u[0] + hwS * t[0], r1 * u[1] + hwS * t[1]],
-          [r0 * u[0] + hwS * t[0], r0 * u[1] + hwS * t[1]],
-        ],
-        ...zThrough,
-      });
-    }
-    treadInfo.lugsTotal = count;
-    treadInfo.lugsPerSegment = perSeg;
   }
 
   // -------------------------------------------------------------------------
@@ -1792,6 +2009,13 @@ export function planWheel(input = {}) {
     solidDisk,
     joints,
     jointClearance: jc,
+    profile: {
+      shape: crowned ? p.profile.shape : 'flat',
+      crownDrop: rnd(crownDrop, 2),
+      crownRadius: rnd(crownRadius, 1),
+      shoulderR: rnd(R - crownDrop, 2),
+    },
+    sections,
     outline,
     pieces,
     uniquePieces,

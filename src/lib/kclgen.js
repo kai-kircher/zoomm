@@ -4,16 +4,35 @@
 // use, pinned to kclVersion 1.0) with exact fixed coordinates — every number
 // is precomputed by the planner, so no constraints are needed and the engine
 // has nothing to solve. Geometry uses only the most battle-tested ops:
-// sketch blocks, region(), extrude(), offsetPlane() and subtract().
+// sketch blocks, region(), extrude(), loft(), offsetPlane() and subtract().
 //
 // One .kcl file per *unique* piece: most wheels are "print piece A × 6";
 // hub features (keyway, D-flat, bolt holes) can make one or two variants.
+//
+// Booleans are the scarce resource here, not entity count. Zoo's engine gets
+// slow and then unreliable as the tool list grows — the demo wheel's twelve
+// cutters took ~80 s, and busier wheels came back "Batch edit result is not
+// valid" or dropped the connection outright. So every cut that runs the full
+// depth of the piece — bore, keyway, bolt holes, every web void, every tread
+// bar — is emitted as another *loop in the same sketch* and resolved by
+// region(), which the engine does in one pass. Measured on the demo wheel:
+// 80 s of booleans → 3 s of sketch. Only genuinely partial-depth cuts
+// (circumferential grooves on a flat tread) are left as subtract tools.
+//
+// A crowned piece is lofted through one such sketch per z level instead of
+// extruded. That is also forced: the engine rejects any boolean whose
+// operands have curved faces, so a crown can never be cut in — it has to be
+// in the profile from the start.
 
 const SUBTRACT_BATCH = 12;
 
+// Six decimals — a thousandth of a micron. Coordinates are printed finer than
+// anything prints or measures because the engine solves each arc from its
+// endpoints and centre: an endpoint a rounding step off its own radius is an
+// arc that does not quite close. See snapArcEndpoints below.
 function fmt(v) {
   if (!Number.isFinite(v)) return '0';
-  let x = Math.round(v * 1e4) / 1e4;
+  let x = Math.round(v * 1e6) / 1e6;
   if (Object.is(x, -0)) x = 0;
   return String(x);
 }
@@ -28,6 +47,13 @@ const pt = ([x, y]) => `[${fmt(x)}, ${fmt(y)}]`;
 // the neighbouring entity that shares each endpoint is moved with it, keeping
 // the loop chained. Measured on engine 0.2.186: 8e-4 mm of mismatch is
 // rejected, 1e-4 is accepted (see docs/zoo-api-notes.md, WW-3).
+//
+// Tread bars put fifty-odd arcs on a single rim loop, well past the handful a
+// filleted honeycomb cell carries, and a loop is only as closed as its worst
+// entity — which is why the printed precision above went to six decimals.
+// Snapping alone would leave the residue at the 5e-5 the 4-decimal emitter
+// used to print, only fifteen times under a mismatch the engine is known to
+// reject; together they hold it near 1e-6.
 function snapArcEndpoints(segs) {
   const out = segs.map((s) => ({ ...s, a: [...s.a], b: [...s.b] }));
   const dist = (p, c) => Math.hypot(p[0] - c[0], p[1] - c[1]);
@@ -55,10 +81,12 @@ function snapArcEndpoints(segs) {
   return out;
 }
 
-function emitPathEntities(segs, indent = '  ') {
+// `prefix` keeps entity names unique: a section sketch now holds the piece
+// boundary and every through-hole loop side by side.
+function emitPathEntities(segs, prefix = 'e', indent = '  ') {
   const lines = [];
   snapArcEndpoints(segs).forEach((s, i) => {
-    const name = `e${i + 1}`;
+    const name = `${prefix}${i + 1}`;
     if (s.kind === 'line') {
       lines.push(`${indent}${name} = line(start = ${pt(s.a)}, end = ${pt(s.b)})`);
     } else {
@@ -70,6 +98,43 @@ function emitPathEntities(segs, indent = '  ') {
     }
   });
   return lines;
+}
+
+// A cutter's boundary as a plain segment loop, or null when it is a circle
+// (which KCL draws with a single entity).
+function loopOf(c) {
+  if (c.shape === 'poly') return c.pts.map((q, i) => ({ kind: 'line', a: q, b: c.pts[(i + 1) % c.pts.length] }));
+  if (c.shape === 'path') return c.segs;
+  return null;
+}
+
+// A cut that spans the whole piece is a hole in the profile, not a tool.
+const isThrough = (c, W) => c.shape !== 'annulus' && c.z0 <= 0 && c.z1 >= W;
+
+// One section: the piece's boundary at height z plus every through-hole, all
+// in a single sketch, resolved to the material face by its seed point.
+function emitSection(sec, holes, idx) {
+  const sk = `sec${idx + 1}Sk`;
+  const prof = `sec${idx + 1}`;
+  const plane = sec.z === 0 ? 'XY' : `offsetPlane(XY, offset = ${fmt(sec.z)})`;
+  const out = [`${sk} = sketch(on = ${plane}) {`];
+  if (sec.kind === 'circle') out.push(`  rim = circle(start = ${pt([sec.r, 0])}, center = [0, 0])`);
+  else out.push(...emitPathEntities(sec.segs));
+  holes.forEach((c, i) => {
+    if (c.shape === 'circle') {
+      out.push(`  h${i + 1} = circle(start = ${pt([c.c[0] + c.r, c.c[1]])}, center = ${pt(c.c)})`);
+    } else {
+      out.push(...emitPathEntities(loopOf(c), `h${i + 1}_`));
+    }
+  });
+  out.push('}');
+  out.push(
+    sec.kind === 'circle' && !holes.length
+      ? `${prof} = region(segments = [${sk}.rim])`
+      : `${prof} = region(point = ${pt(sec.interior)}, sketch = ${sk})`
+  );
+  out.push(`hide(${sk})`);
+  return { code: out.join('\n'), varName: prof };
 }
 
 // Emit one cutter prism: sketch on an offset plane + region + extrude.
@@ -105,13 +170,25 @@ function emitCutter(cutter, idx, W) {
     regionExpr = `region(point = ${pt([cx, cy])}, sketch = ${sk})`;
   } else {
     // 'path' — closed loop of lines and arcs with a known interior point
-    out.push(...emitPathEntities(cutter.segs));
+    out.push(...emitPathEntities(cutter.segs, 'e'));
     out.push(`}`);
     regionExpr = `region(point = ${pt(cutter.interior)}, sketch = ${sk})`;
   }
   out.push(`${base} = extrude(${regionExpr}, length = ${fmt(len)})`);
   out.push(`hide(${sk})`);
   return { code: out.join('\n'), varName: base };
+}
+
+// Human-readable one-liner for the tread and the tire's cross-section.
+function treadDesc(plan) {
+  const t = plan.treadInfo;
+  const bits = [`${t.style} tread`];
+  if (t.bars) bits.push(`${t.bars} bars${t.barAngle ? ` at ${fmt(t.barAngle)}°` : ''}`);
+  if (t.ribs) bits.push(`${t.ribs} rib${t.ribs === 1 ? '' : 's'}`);
+  const pr = plan.profile;
+  if (pr.shape === 'round') bits.push(`round section (R${fmt(pr.crownRadius)})`);
+  else if (pr.shape === 'crowned') bits.push(`crowned ${fmt(pr.crownDrop)} mm (R${fmt(pr.crownRadius)})`);
+  return bits.join(', ');
 }
 
 function headerComment(plan, piece) {
@@ -126,7 +203,7 @@ function headerComment(plan, piece) {
   }[b.type];
   return [
     `// Wheelwright — 3D-printable segmented wheel`,
-    `// Wheel: Ø${fmt(p.diameter)} × ${fmt(p.width)} mm, ${plan.infillInfo.style} web, ${p.tread} tread, ${boreDesc}`,
+    `// Wheel: Ø${fmt(p.diameter)} × ${fmt(p.width)} mm, ${plan.infillInfo.style} web, ${treadDesc(plan)}, ${boreDesc}`,
     `// Piece ${piece.label}: print ${piece.count} of ${plan.N} segment${plan.N > 1 ? 's' : ''}` +
       (plan.N > 1 ? ` (${fmt(plan.segAngle)}° each, slide-together dovetails, ${fmt(plan.jointClearance)} mm clearance/side)` : ''),
     `// Units mm. Piece lies print-ready on the XY plane.`,
@@ -138,27 +215,38 @@ function headerComment(plan, piece) {
 function emitPiece(plan, piece) {
   const W = plan.W;
   const out = [headerComment(plan, piece), ''];
+  const holes = piece.cutters.filter((c) => isThrough(c, W));
+  const tools = piece.cutters.filter((c) => !isThrough(c, W));
+  const sections = plan.sections;
 
-  // --- outline ---
-  out.push('// Piece outline (dovetail tenons and pockets are part of the profile)');
-  out.push('outlineSk = sketch(on = XY) {');
-  let regionExpr;
-  if (plan.outline.kind === 'circle') {
-    out.push(`  rim = circle(start = ${pt([plan.outline.r, 0])}, center = [0, 0])`);
-    out.push('}');
-    regionExpr = 'region(segments = [outlineSk.rim])';
+  // --- profile sections ---
+  out.push(
+    sections.length > 1
+      ? `// Piece profile, drawn at ${sections.length} heights across the width.`
+      : '// Piece profile.'
+  );
+  out.push('// Dovetails, bore, web voids and tread bars are all loops in the');
+  out.push('// same sketch; region() picks out the material face between them.');
+  const profs = [];
+  sections.forEach((sec, i) => {
+    if (sections.length > 1) out.push(`// section ${i + 1} of ${sections.length}, z = ${fmt(sec.z)}`);
+    const { code, varName } = emitSection(sec, holes, i);
+    out.push(code, '');
+    profs.push(varName);
+  });
+
+  if (profs.length > 1) {
+    out.push(`// The crown is lofted through the sections — it cannot be cut in:`);
+    out.push(`// the engine refuses booleans on solids with curved faces.`);
+    out.push(`blank = loft([${profs.join(', ')}])`);
   } else {
-    out.push(...emitPathEntities(plan.outline.segs));
-    out.push('}');
-    regionExpr = `region(point = ${pt(plan.outline.interior)}, sketch = outlineSk)`;
+    out.push(`blank = extrude(${profs[0]}, length = ${fmt(W)})`);
   }
-  out.push(`blank = extrude(${regionExpr}, length = ${fmt(W)})`);
-  out.push('hide(outlineSk)');
   out.push('');
 
-  // --- cutters ---
+  // --- partial-depth cutters (circumferential grooves) ---
   const vars = [];
-  piece.cutters.forEach((c, i) => {
+  tools.forEach((c, i) => {
     out.push(`// cutter: ${c.id}`);
     const { code, varName } = emitCutter(c, i, W);
     out.push(code, '');
@@ -186,8 +274,16 @@ function assemblyGuide(plan) {
   const lines = [];
   lines.push(`# Wheelwright assembly guide`);
   lines.push('');
-  lines.push(`Wheel: **Ø${fmt(p.diameter)} × ${fmt(p.width)} mm** — ${plan.infillInfo.style} web, ${p.tread} tread, ${p.bore.type} hub, ${p.material.toUpperCase()}.`);
+  lines.push(`Wheel: **Ø${fmt(p.diameter)} × ${fmt(p.width)} mm** — ${plan.infillInfo.style} web, ${treadDesc(plan)}, ${p.bore.type} hub, ${p.material.toUpperCase()}.`);
   lines.push('');
+  if (plan.profile.shape !== 'flat') {
+    lines.push(
+      `The tread is ${plan.profile.shape === 'round' ? 'a full round section' : 'crowned'}: Ø${fmt(p.diameter)} at mid-width, ` +
+        `falling to Ø${fmt(plan.profile.shoulderR * 2)} at each shoulder. The piece is lofted through ${plan.sections.length} profiles rather than extruded, ` +
+        `so expect the export to take a few minutes per piece — curved faces cost the engine far more than flat ones.`
+    );
+    lines.push('');
+  }
   lines.push(`## Pieces`);
   lines.push('');
   lines.push(`| File | Print qty | Footprint (mm) |`);

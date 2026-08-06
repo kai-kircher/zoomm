@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { planWheel, normalizeParams, IN } from '../src/lib/wheel.js';
+import { generateKcl } from '../src/lib/kclgen.js';
 
 test('unit conversion: inches convert to mm', () => {
   const { p } = normalizeParams({ units: 'in', diameter: 14, width: 2 });
@@ -13,7 +14,10 @@ test('small wheel prints in one piece', () => {
   const plan = planWheel({ diameter: 120, width: 30, bore: { type: 'plain', diameter: 8 } });
   assert.equal(plan.N, 1);
   assert.equal(plan.joints.length, 0);
-  assert.equal(plan.outline.kind, 'circle');
+  // Default tread is lugged, so the rim is a ring with the bars notched into
+  // it; a slick one-piece wheel is a plain circle.
+  assert.equal(plan.outline.kind, 'ring');
+  assert.equal(planWheel({ diameter: 120, width: 30, tread: 'slick', bore: { type: 'plain', diameter: 8 } }).outline.kind, 'circle');
   assert.equal(plan.uniquePieces.length, 1);
   assert.ok(plan.fit.pieceFits);
 });
@@ -51,9 +55,67 @@ test('sector outline is a closed continuous loop', () => {
     const dy = cur.b[1] - nxt.a[1];
     assert.ok(Math.hypot(dx, dy) < 1e-6, `segment ${i} does not connect to ${i + 1}`);
   }
-  // 2 arcs + 2 face lines + 4 lines per dovetail per face
-  const expected = 4 + plan.joints.length * 8;
+  // inner arc + 2 face lines + 4 lines per dovetail per face, then the outer
+  // boundary: one arc per gap between tread bars plus 4 entities per bar
+  // window (arc in, wall down, floor arc, wall up).
+  const bars = plan.treadInfo.barsPerSegment || 0;
+  const expected = 3 + plan.joints.length * 8 + (4 * bars + 1);
   assert.equal(segs.length, expected);
+});
+
+test('tread bars are notched into the profile, never subtracted', () => {
+  for (const tread of ['lugged', 'chevron', 'angled', 'diamond']) {
+    const plan = planWheel({ tread });
+    const ids = plan.uniquePieces.flatMap((u) => u.cutters.map((c) => c.id));
+    assert.ok(!ids.some((id) => /^lug|^bar/.test(id)), `${tread}: no bar cutters`);
+    assert.ok(plan.treadInfo.bars > 0, `${tread}: bars counted`);
+    // Every section must dip to the bar floor and rise to the crown.
+    for (const sec of plan.sections) {
+      const radii = sec.segs.filter((s) => s.kind === 'arc' && s.center[0] === 0 && s.center[1] === 0).map((s) => s.radius);
+      const rMax = Math.max(...radii);
+      assert.ok(radii.some((r) => Math.abs(r - (rMax - plan.params.treadDepth)) < 1e-6), `${tread}: bar floor present`);
+    }
+  }
+});
+
+test('crowned and round profiles fall away to the shoulders', () => {
+  const flat = planWheel({ tread: 'slick' });
+  assert.equal(flat.sections.length, 1);
+  assert.equal(flat.profile.crownDrop, 0);
+
+  const crowned = planWheel({ tread: 'slick', profile: { shape: 'crowned', crownDrop: 6 } });
+  assert.ok(crowned.sections.length > 1, 'a crown needs several sections to loft through');
+  assert.equal(crowned.profile.crownDrop, 6);
+  const rAt = (s) => (s.kind === 'circle' ? s.r : Math.max(...s.segs.filter((g) => g.kind === 'arc' && g.center[0] === 0).map((g) => g.radius)));
+  const mid = crowned.sections.find((s) => Math.abs(s.z - crowned.W / 2) < 1e-6);
+  assert.ok(Math.abs(rAt(mid) - crowned.radii.R) < 0.01, 'peak radius at mid-width');
+  for (const s of [crowned.sections[0], crowned.sections[crowned.sections.length - 1]]) {
+    assert.ok(Math.abs(rAt(s) - (crowned.radii.R - 6)) < 0.01, 'shoulders sit a full crown drop in');
+  }
+
+  // A round section is the crown taken to the half-width: a semicircle.
+  const round = planWheel({ diameter: 200, width: 28, tread: 'slick', profile: { shape: 'round' } });
+  assert.equal(round.profile.crownDrop, 14);
+  assert.ok(Math.abs(round.profile.crownRadius - 14) < 0.05, 'section radius equals the half-width');
+});
+
+test('an auto bar count spaces bars out to grant the angle asked for', () => {
+  for (const treadAngle of [15, 30, 45]) {
+    const plan = planWheel({ tread: 'chevron', treadAngle });
+    assert.equal(plan.treadInfo.barAngle, treadAngle, `${treadAngle}° delivered as asked`);
+    assert.ok(!plan.notes.some((n) => /Tread angle reduced/.test(n)));
+  }
+});
+
+test('a pinned bar count caps the slant instead, and sections stay congruent', () => {
+  const plan = planWheel({ tread: 'chevron', treadAngle: 60, treadCount: 60 });
+  assert.equal(plan.treadInfo.bars, 60, 'the pinned count wins');
+  assert.ok(plan.treadInfo.barAngle < 60, 'the slant gives way instead');
+  assert.ok(plan.notes.some((n) => /Tread angle reduced/.test(n)));
+  for (const p of [plan, planWheel({ tread: 'angled', treadAngle: 40, profile: { shape: 'crowned' } })]) {
+    const counts = new Set(p.sections.map((s) => s.segs.length));
+    assert.equal(counts.size, 1, 'every section must have the same entity count for the loft');
+  }
 });
 
 test('dovetail pockets are larger than tenons by the clearance', () => {
@@ -92,9 +154,10 @@ test('bolt count divisible by segments yields identical pieces', () => {
   assert.equal(bolts.length, 1); // one bolt hole per segment
 });
 
-test('lug pattern repeats per segment', () => {
+test('bar pattern repeats per segment', () => {
   const plan = planWheel({ tread: 'lugged' });
-  assert.equal(plan.treadInfo.lugsTotal % plan.N, 0);
+  assert.equal(plan.treadInfo.bars % plan.N, 0);
+  assert.equal(plan.treadInfo.bars / plan.N, plan.treadInfo.barsPerSegment);
 });
 
 test('oversized wheel on tiny printer warns', () => {
@@ -636,4 +699,41 @@ test('segmented concentric bores live in the outline, not in a cutter', () => {
       assert.ok(!u.cutters.some((c) => c.id === 'bore'), `piece ${u.label} has no bore cutter`);
     }
   }
+});
+
+// The loft can only raise a surface between sections that match one another
+// entity for entity, and region() can only resolve loops that actually close.
+// Both are easy to break from a long way away — a tread option, a crown, a web
+// pattern, a hub that moves a seam — so sweep the combinations rather than
+// trusting any single one.
+test('every tread × profile × web × hub combination yields closed, congruent sections', () => {
+  const problems = [];
+  let count = 0;
+  for (const tread of ['slick', 'ribbed', 'lugged', 'diamond', 'chevron', 'angled']) {
+    for (const shape of ['flat', 'crowned', 'round']) {
+      for (const infill of ['solid', 'spokes', 'honeycomb', 'lattice', 'auxetic', 'voronoi']) {
+        for (const bore of ['keyed', 'hex', 'dbore', 'bolt']) {
+          for (const diameter of [120, 355.6]) {
+            const where = `${tread}/${shape}/${infill}/${bore}/Ø${diameter}`;
+            const plan = planWheel({ diameter, tread, infill, profile: { shape }, bore: { type: bore } });
+            count++;
+            const shapes = new Set(plan.sections.map((s) => (s.kind === 'circle' ? 'circle' : s.segs.length)));
+            if (shapes.size !== 1) problems.push(`${where}: sections differ (${[...shapes]})`);
+            for (const sec of plan.sections) {
+              if (sec.kind === 'circle') continue;
+              for (let i = 0; i < sec.segs.length; i++) {
+                const cur = sec.segs[i];
+                const nxt = sec.segs[(i + 1) % sec.segs.length];
+                if (Math.hypot(cur.b[0] - nxt.a[0], cur.b[1] - nxt.a[1]) > 1e-6) problems.push(`${where}: open at segment ${i}`);
+                if (Math.hypot(cur.a[0] - cur.b[0], cur.a[1] - cur.b[1]) < 1e-6) problems.push(`${where}: zero-length segment ${i}`);
+              }
+            }
+            generateKcl(plan); // must not throw for any of them
+          }
+        }
+      }
+    }
+  }
+  assert.ok(count > 500, `swept ${count} configurations`);
+  assert.deepEqual(problems.slice(0, 5), [], `${problems.length} bad configurations`);
 });

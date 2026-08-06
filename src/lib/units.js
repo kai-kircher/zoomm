@@ -21,6 +21,7 @@ export const LENGTH_INPUTS = Object.freeze([
   { id: 'diameter', path: ['diameter'] },
   { id: 'width', path: ['width'] },
   { id: 'treadDepth', path: ['treadDepth'] },
+  { id: 'crownDrop', path: ['profile', 'crownDrop'] },
   { id: 'boreDiameter', path: ['bore', 'diameter'] },
   { id: 'keyWidth', path: ['bore', 'keyWidth'] },
   { id: 'keyDepth', path: ['bore', 'keyDepth'] },

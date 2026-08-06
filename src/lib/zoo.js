@@ -78,7 +78,11 @@ export function exportStl(kclFiles, tokenOverride) {
       const outDir = join(work, f.name.replace(/\.kcl$/, ''));
       mkdirSync(outDir, { recursive: true });
       const r = spawnSync(cli.path, ['kcl', 'export', '--output-format=stl', src, outDir], {
-        timeout: 300000,
+        // Flat pieces come back in seconds. A crowned one is lofted through
+        // several profiles and the engine spends minutes fitting the surface,
+        // so the budget has to be generous or a legitimate export gets killed
+        // and reported as "unknown error".
+        timeout: 900000,
         encoding: 'utf8',
         windowsHide: true,
         env: { ...process.env, ZOO_API_TOKEN: token },

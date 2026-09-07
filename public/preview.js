@@ -322,10 +322,16 @@ export function buildLoftGeometry(THREE, plan, unique) {
   }
 
   const idx = [];
-  // Side walls, one quad strip per loop per gap. Winding follows each loop's
-  // own orientation so the outer skin and the hole walls both face outwards.
+  // Side walls, one quad strip per loop per gap. A quad wound along its loop
+  // faces to the right of travel, so which way a wall ends up pointing is the
+  // loop's orientation *and* which side of it the material lies on: the outer
+  // skin faces away from its loop's interior, a hole wall faces into it.
+  // Treating a hole like the outline leaves every void inside out — still
+  // watertight, so the shell reads as solid to an edge count, but the webs
+  // render see-through and the piece looks hollow.
   loops.forEach((l, li) => {
-    const flip = signedArea(l) < 0;
+    const hole = li > 0;
+    const flip = (signedArea(l) < 0) !== hole;
     for (let i = 0; i < K - 1; i++) {
       for (let j = 0; j < l.length; j++) {
         const j2 = (j + 1) % l.length;

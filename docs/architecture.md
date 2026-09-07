@@ -405,6 +405,15 @@ full parameter set and piece list — the machine-readable half of the bundle).
   bars have moved. If the rings ever fail to match, the builder returns `null`
   and the caller falls back to a plain extrusion rather than drawing something
   torn.
+- **A hole's wall faces the opposite way to the outline's.** A quad strip wound
+  along its loop faces to the right of travel, so the side the material sits on
+  decides the winding, not the loop's orientation alone: the outer skin faces
+  away from its loop, a web void's wall faces into it. Winding both the same way
+  leaves a mesh that still passes an edge count — every edge shared by two faces
+  — and still shows a correctly outward tread, but every void is inside out, so
+  the webs render see-through and the whole piece looks hollow. Only lofted
+  pieces stitch their own walls, so this was a crowned/round-and-slanted-bar
+  symptom exclusively; `ExtrudeGeometry` gets it right on its own.
 - **2D fallback.** If WebGL is unavailable the same plan renders through
   `Path2D` on the same canvas — same outlines, same holes, top view. The
   viewport labels which one you're looking at.
@@ -423,13 +432,13 @@ code: minimum hub vertex radius equals the bore radius, no stray geometry.
 
 ## 15. Testing strategy
 
-`npm test` runs 115 `node:test` cases with no dependencies and no network:
+`npm test` runs 116 `node:test` cases with no dependencies and no network:
 
 | Suite | What it pins |
 | --- | --- |
 | `wheel.test.js` (38) | Chunking math, joint clearance, dedupe, bolt/seam clearance, bore schemes, and the web patterns' guarantees — cell-to-cell wall, no overlap, no nesting, no self-crossing loops, band containment, seam clearance, measured on the finished millimetre geometry across 31 configurations. |
 | `kclgen.test.js` (7) | KCL well-formedness across a config matrix: balanced blocks, entity naming, arc winding, arc-endpoint radius agreement, batch sizes, that full-depth cuts are sketch loops rather than tools, and that a crowned piece lofts instead of extruding. |
-| `preview.test.js` (9) | The rendered triangulation matches the plan (this is where phantom-cylinder-class bugs die), including that a crowned piece previews crowned and every lofted mesh is watertight and outward-facing. |
+| `preview.test.js` (10) | The rendered triangulation matches the plan (this is where phantom-cylinder-class bugs die), including that a crowned piece previews crowned, that every lofted mesh is watertight and outward-facing, and that it encloses the same volume the equivalent extrusion does — the check that catches an inverted void. |
 | `units.test.js` (6) | mm ⇄ in round-trips, which fields are lengths, and that the form table can't drift from `LENGTH_FIELDS`. |
 | `env.test.js` (4) | `.env` parsing and token resolution precedence. |
 

@@ -303,3 +303,58 @@ test('a flat piece needs no loft and every section stays congruent', () => {
   assert.ok(angled.sections.length > 1);
   assert.ok(buildLoftGeometry(THREE, angled, angled.uniquePieces[0]), 'angled bars loft cleanly');
 });
+
+// An inverted void is invisible to the checks above: flipping a hole's wall
+// quads leaves every edge shared by two faces, and the tread band those walls
+// never touch still faces out. What it changes is which side of the wall is
+// material, so the mesh encloses the web pockets instead of hollowing them and
+// the piece renders see-through. Enclosed volume is the check with teeth.
+function signedVolume(geo) {
+  const pos = geo.getAttribute('position');
+  const idx = geo.getIndex() ? geo.getIndex().array : [...Array(pos.count).keys()];
+  let v = 0;
+  for (let i = 0; i < idx.length; i += 3) {
+    const p = (j) => [pos.getX(idx[i + j]), pos.getY(idx[i + j]), pos.getZ(idx[i + j])];
+    const [a, b, c] = [p(0), p(1), p(2)];
+    v += (a[0] * (b[1] * c[2] - c[1] * b[2]) - a[1] * (b[0] * c[2] - c[0] * b[2]) + a[2] * (b[0] * c[1] - c[0] * b[1])) / 6;
+  }
+  return v;
+}
+
+const extrudedVolume = (plan, u) =>
+  signedVolume(new THREE.ExtrudeGeometry(buildPieceShape(THREE, plan, u), { depth: plan.W, bevelEnabled: false, curveSegments: 48 }));
+
+// Two ways into the loft, each with a plain extrusion of the same solid to
+// measure against: a crown of 0.05 mm is the flat wheel geometrically but
+// lofts, and slanting the bars only rotates each section about the axis, which
+// leaves the swept volume alone.
+test('every lofted piece encloses the solid its extrusion does — voids stay voids', () => {
+  const CASES = [
+    ['crowned', (base) => [{ ...base, profile: { shape: 'flat' } }, { ...base, profile: { shape: 'crowned', crownDrop: 0.05 } }]],
+    ['angled', (base) => [{ ...base, tread: 'angled', treadCount: 48, treadAngle: 0 }, { ...base, tread: 'angled', treadCount: 48, treadAngle: 30 }]],
+    ['chevron', (base) => [{ ...base, tread: 'chevron', treadCount: 48, treadAngle: 0 }, { ...base, tread: 'chevron', treadCount: 48, treadAngle: 30 }]],
+  ];
+  for (const infill of ['solid', 'spokes', 'honeycomb', 'flexweb', 'lattice', 'auxetic', 'voronoi']) {
+    for (const type of ['keyed', 'plain', 'hex', 'dbore', 'bolt']) {
+      for (const [via, pair] of CASES) {
+        const [flatCfg, loftCfg] = pair({ infill, bore: { type } });
+        const flat = planWheel(flatCfg);
+        const lofted = planWheel(loftCfg);
+        const what = `${infill}/${type} via ${via}`;
+        assert.equal(flat.sections.length, 1, `${what}: reference extrudes`);
+        assert.ok(lofted.sections.length > 1, `${what}: subject lofts`);
+        for (let k = 0; k < flat.uniquePieces.length; k++) {
+          const geo = buildLoftGeometry(THREE, lofted, lofted.uniquePieces[k]);
+          assert.ok(geo, `${what}: piece ${k} lofts`);
+          const want = extrudedVolume(flat, flat.uniquePieces[k]);
+          const got = signedVolume(geo);
+          assert.ok(want > 0, `${what}: piece ${k} extrudes to a positive volume`);
+          assert.ok(
+            Math.abs(got - want) / want < 0.02,
+            `${what}: piece ${k} lofts to ${got.toFixed(0)} mm³, extrudes to ${want.toFixed(0)} mm³`
+          );
+        }
+      }
+    }
+  }
+});

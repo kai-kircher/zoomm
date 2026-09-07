@@ -72,9 +72,16 @@ for (const [name, cfg] of CONFIGS) {
       const W = Number(/^W = ([\d.]+)$/m.exec(src)[1]);
       assert.equal(W, plan.W);
       for (const c of cutters) {
-        assert.ok(Number.isFinite(c.z0) && Number.isFinite(c.z1), 'cutter has a depth range');
-        assert.ok(c.z1 > c.z0, 'cutter depth range is non-empty');
-        assert.ok(['circle', 'poly', 'path', 'annulus'].includes(c.shape));
+        assert.ok(['circle', 'poly', 'path', 'revolve'].includes(c.shape), `known shape ${c.shape}`);
+        if (c.shape === 'revolve') {
+          // The tire carries no depth range: its profile is drawn in (r, z),
+          // so it already says where across the width it starts and stops.
+          assert.equal(c.z0, undefined);
+          assert.ok(c.segs.length >= 4, 'a revolved profile is a closed loop');
+        } else {
+          assert.ok(Number.isFinite(c.z0) && Number.isFinite(c.z1), 'cutter has a depth range');
+          assert.ok(c.z1 > c.z0, 'cutter depth range is non-empty');
+        }
       }
     }
 
@@ -138,31 +145,53 @@ test('arcs agree with their own centre', () => {
   }
 });
 
-test('a flat piece has one section; a curved one has several', () => {
-  const flat = planWheel({ tread: 'lugged', profile: { shape: 'flat' } });
-  assert.equal(flat.sections.length, 1);
-  assert.equal(readLiteral(pieceFiles(generateSource(flat))[0].content, 'SECTIONS').length, 1);
+test('only a slanted tread makes a piece more than one section', () => {
+  // The crown used to force several: it was lofted through sampled heights,
+  // which was both slower and — because a circular section curves hardest
+  // where uniform sampling is thinnest — inexact. It is a revolved cut now, so
+  // the only thing left that varies the profile with height is a bar that
+  // leans.
+  for (const shape of ['flat', 'crowned', 'round']) {
+    const plan = planWheel({ tread: 'lugged', profile: { shape, crownDrop: 5 } });
+    assert.equal(plan.sections.length, 1, `${shape} + straight bars is a single prism`);
+    assert.equal(readLiteral(pieceFiles(generateSource(plan))[0].content, 'SECTIONS').length, 1);
+    const cutters = readLiteral(pieceFiles(generateSource(plan))[0].content, 'CUTTERS');
+    assert.equal(
+      cutters.filter((c) => c.shape === 'revolve').length,
+      shape === 'flat' ? 0 : 1,
+      `${shape}: a crown is one revolved tool, a flat tread none`
+    );
+  }
 
-  const crowned = planWheel({ tread: 'lugged', profile: { shape: 'crowned', crownDrop: 5 } });
-  assert.ok(crowned.sections.length > 1, 'a crown needs several sections');
-  const src = pieceFiles(generateSource(crowned))[0].content;
-  const sections = readLiteral(src, 'SECTIONS');
-  assert.equal(sections.length, crowned.sections.length);
-  // Congruence is what makes the loft buildable — matching entity counts.
+  const slanted = planWheel({ tread: 'chevron', treadAngle: 30, profile: { shape: 'round' } });
+  assert.ok(slanted.sections.length > 1, 'a slanted tread still lofts');
+  const sections = readLiteral(pieceFiles(generateSource(slanted))[0].content, 'SECTIONS');
+  assert.equal(sections.length, slanted.sections.length);
+  // Congruence is what makes that loft buildable — matching entity counts.
   const counts = new Set(sections.map((s) => (s.segs ? s.segs.length : -1)));
   assert.equal(counts.size, 1, `all sections have the same entity count, got ${[...counts]}`);
 });
 
-test('partial-depth cuts keep their depth range; full-depth ones span the piece', () => {
-  // A flat ribbed wheel is the case with both kinds: circumferential grooves
-  // that stop short, and a bore that runs right through.
-  const plan = planWheel({ tread: 'ribbed', infill: 'spokes' });
-  const src = pieceFiles(generateSource(plan))[0].content;
-  const cutters = readLiteral(src, 'CUTTERS');
-  const partial = cutters.filter((c) => c.z0 > 0 || c.z1 < plan.W);
-  const through = cutters.filter((c) => c.z0 <= 0 && c.z1 >= plan.W);
-  assert.ok(partial.length > 0, 'the grooves stop short of the faces');
-  assert.ok(through.length > 0, 'the bore runs through');
+test('every prismatic cut runs the full depth; the tire is the one that does not', () => {
+  // Grooves were the only cut that stopped partway through the width, and they
+  // are runs of the tire's revolved profile now. So the prismatic tools are
+  // uniformly through-cuts, and each overshoots both faces when it is built.
+  for (const tread of ['slick', 'ribbed', 'lugged', 'diamond']) {
+    for (const shape of ['flat', 'crowned', 'round']) {
+      const plan = planWheel({ tread, profile: { shape }, infill: 'spokes', ribCount: 3 });
+      const where = `${tread}/${shape}`;
+      for (const f of pieceFiles(generateSource(plan))) {
+        for (const c of readLiteral(f.content, 'CUTTERS')) {
+          if (c.shape === 'revolve') continue;
+          assert.ok(c.z0 <= 0 && c.z1 >= plan.W, `${where}: ${c.shape} cut runs the full depth`);
+        }
+      }
+    }
+  }
+  const ribbed = planWheel({ tread: 'ribbed', ribCount: 3, infill: 'spokes' });
+  const cutters = readLiteral(pieceFiles(generateSource(ribbed))[0].content, 'CUTTERS');
+  assert.equal(cutters.filter((c) => c.shape === 'revolve').length, 1, 'grooves ride the tire tool');
+  assert.ok(cutters.some((c) => c.shape !== 'revolve'), 'and the bore still runs through');
 });
 
 test('the bundle carries the runtime that builds it', () => {

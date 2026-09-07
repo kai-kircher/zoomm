@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { planWheel, normalizeParams, IN } from '../src/lib/wheel.js';
+import { planWheel, normalizeParams, IN, tireSurfaceAt } from '../src/lib/wheel.js';
 import { generateSource } from '../src/lib/occgen.js';
 
 test('unit conversion: inches convert to mm', () => {
@@ -69,11 +69,16 @@ test('tread bars are notched into the profile, never subtracted', () => {
     const ids = plan.uniquePieces.flatMap((u) => u.cutters.map((c) => c.id));
     assert.ok(!ids.some((id) => /^lug|^bar/.test(id)), `${tread}: no bar cutters`);
     assert.ok(plan.treadInfo.bars > 0, `${tread}: bars counted`);
-    // Every section must dip to the bar floor and rise to the crown.
+    // Every section must dip to the bar floor. It is measured from the wheel
+    // radius rather than from the section's own widest arc, because a blank
+    // that a tire tool will trim is drawn a hair oversize (see rimOver).
     for (const sec of plan.sections) {
       const radii = sec.segs.filter((s) => s.kind === 'arc' && s.center[0] === 0 && s.center[1] === 0).map((s) => s.radius);
-      const rMax = Math.max(...radii);
-      assert.ok(radii.some((r) => Math.abs(r - (rMax - plan.params.treadDepth)) < 1e-6), `${tread}: bar floor present`);
+      assert.ok(
+        radii.some((r) => Math.abs(r - (plan.radii.R - plan.params.treadDepth)) < 1e-6),
+        `${tread}: bar floor present`
+      );
+      assert.ok(Math.max(...radii) >= plan.radii.R - 1e-6, `${tread}: boundary reaches the rim`);
     }
   }
 });
@@ -82,21 +87,75 @@ test('crowned and round profiles fall away to the shoulders', () => {
   const flat = planWheel({ tread: 'slick' });
   assert.equal(flat.sections.length, 1);
   assert.equal(flat.profile.crownDrop, 0);
+  assert.ok(
+    !flat.uniquePieces[0].cutters.some((c) => c.shape === 'revolve'),
+    'a flat slick tread is already its own finished surface — no tool needed'
+  );
 
   const crowned = planWheel({ tread: 'slick', profile: { shape: 'crowned', crownDrop: 6 } });
-  assert.ok(crowned.sections.length > 1, 'a crown needs several sections to loft through');
+  assert.equal(crowned.sections.length, 1, 'the crown is cut, so the profile itself stays flat');
   assert.equal(crowned.profile.crownDrop, 6);
-  const rAt = (s) => (s.kind === 'circle' ? s.r : Math.max(...s.segs.filter((g) => g.kind === 'arc' && g.center[0] === 0).map((g) => g.radius)));
-  const mid = crowned.sections.find((s) => Math.abs(s.z - crowned.W / 2) < 1e-6);
-  assert.ok(Math.abs(rAt(mid) - crowned.radii.R) < 0.01, 'peak radius at mid-width');
-  for (const s of [crowned.sections[0], crowned.sections[crowned.sections.length - 1]]) {
-    assert.ok(Math.abs(rAt(s) - (crowned.radii.R - 6)) < 0.01, 'shoulders sit a full crown drop in');
+
+  // The whole crown is *one arc* of the section circle. This is the assertion
+  // that the shape is exact rather than sampled: a facet chain would show up
+  // here as several entities, and the lofted crown this replaced was 2.99 mm
+  // off the true arc at the shoulder of the round preset below.
+  const tire = crowned.uniquePieces[0].cutters.find((c) => c.shape === 'revolve');
+  assert.ok(tire, 'a crowned tread is cut by one tool of revolution');
+  const arcs = tire.segs.filter((s) => s.kind === 'arc');
+  assert.equal(arcs.length, 1, 'an ungrooved crown is a single arc, not a chain of facets');
+  assert.ok(Math.abs(arcs[0].radius - crowned.profile.crownRadius) < 0.05, 'on the section circle');
+
+  // Tolerances here are the planner's 1e-3 coordinate grid, which the plan's
+  // own crownRadius is rounded onto — not slack in the curve itself.
+  const surf = tireSurfaceAt(crowned);
+  assert.ok(Math.abs(surf(crowned.W / 2) - crowned.radii.R) < 1e-3, 'peak radius at mid-width');
+  for (const z of [0, crowned.W]) {
+    assert.ok(Math.abs(surf(z) - (crowned.radii.R - 6)) < 1e-3, 'shoulders sit a full crown drop in');
   }
 
   // A round section is the crown taken to the half-width: a semicircle.
   const round = planWheel({ diameter: 200, width: 28, tread: 'slick', profile: { shape: 'round' } });
   assert.equal(round.profile.crownDrop, 14);
   assert.ok(Math.abs(round.profile.crownRadius - 14) < 0.05, 'section radius equals the half-width');
+  const rs = tireSurfaceAt(round);
+  for (let i = 0; i <= 40; i++) {
+    const z = (round.W * i) / 40;
+    const u = z - round.W / 2;
+    assert.ok(
+      Math.abs(rs(z) - (round.radii.R - 14 + Math.sqrt(Math.max(0, 196 - u * u)))) < 1e-3,
+      `the running surface is the semicircle at z=${z}`
+    );
+  }
+});
+
+test('circumferential grooves are bands of the tire tool, at a constant depth', () => {
+  // They used to be a parabolic dip rolled into the section curve, capped at
+  // two on a crowned profile because each dip cost three more loft levels.
+  // Now they are runs of the one revolved profile and cost nothing.
+  const plan = planWheel({ diameter: 200, width: 40, tread: 'ribbed', ribCount: 6, profile: { shape: 'round' } });
+  assert.equal(plan.treadInfo.ribs, 6, 'a crowned profile takes as many grooves as a flat one');
+  assert.equal(plan.sections.length, 1);
+  assert.equal(plan.profile.grooves.length, 6);
+
+  // Depth is measured perpendicular to the tread — a groove cut by a wheel of
+  // fixed reach, which is what a moulded groove is — so a floor lies on the
+  // section circle shrunk by that depth. Radial depth is *not* constant off
+  // the centreline, and asserting that it is would be asserting the wrong
+  // tire.
+  const surf = tireSurfaceAt(plan);
+  const rc = plan.profile.crownRadius;
+  const centre = [plan.radii.R - rc, plan.W / 2]; // of the section circle, in (r, z)
+  const rho = (z) => Math.hypot(surf(z) - centre[0], z - centre[1]);
+  for (const [z0, z1] of plan.profile.grooves) {
+    const mid = (z0 + z1) / 2;
+    assert.ok(
+      Math.abs(rho(mid) - (rc - plan.profile.grooveDepth)) < 1e-3,
+      `the groove at z=${mid} floors on the section circle less ${plan.profile.grooveDepth} mm`
+    );
+    assert.ok(Math.abs(rho(z0 - 0.05) - rc) < 1e-3, 'and full crown just outside it');
+    assert.ok(surf(z0 - 0.05) > surf(z0 + 0.05), 'so there is a wall at each edge');
+  }
 });
 
 test('an auto bar count spaces bars out to grant the angle asked for', () => {
@@ -413,7 +472,7 @@ function assertWebIsSound(plan, wall, label) {
         assert.ok(Math.sin(A) * p[0] - Math.cos(A) * p[1] >= -0.02, `${label}/${c.id}: clears the far seam`);
       }
     }
-    // A self-intersecting loop is KCL the engine cannot region().
+    // A self-intersecting loop is a wire the kernel cannot make a face from.
     for (let i = 0; i < loop.length; i++) {
       for (let j = i + 2; j < loop.length; j++) {
         if (i === 0 && j === loop.length - 1) continue;

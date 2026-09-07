@@ -77,12 +77,19 @@ function emitSections(plan) {
 }
 
 function emitCutter(c) {
+  // The tire is the one tool that is not a prism: its loop is drawn in the
+  // (r, z) half-plane and swept about the wheel axis, so it carries no z-range
+  // of its own — the profile already says where it starts and stops.
+  if (c.shape === 'revolve') {
+    return [
+      `    {"shape": "revolve", "seam": ${fmt(c.seam ?? 0)}, "segs": [`,
+      segList(c.segs, '        '),
+      '    ]},',
+    ];
+  }
   const z = `"z0": ${fmt(c.z0)}, "z1": ${fmt(c.z1)}`;
   if (c.shape === 'circle') {
     return [`    {"shape": "circle", "c": ${pt(c.c)}, "r": ${fmt(c.r)}, ${z}},`];
-  }
-  if (c.shape === 'annulus') {
-    return [`    {"shape": "annulus", "rIn": ${fmt(c.rIn)}, "rOut": ${fmt(c.rOut)}, ${z}},`];
   }
   if (c.shape === 'poly') {
     return [`    {"shape": "poly", "pts": ${pts(c.pts)}, ${z}},`];

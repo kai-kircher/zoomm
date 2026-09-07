@@ -11,20 +11,26 @@ The whole vocabulary a generated `piece-*.py` speaks is small on purpose:
 
     section  {z, kind: sector|ring|circle, segs|r}   the piece boundary at height z
     seg      {kind: line|arc, a, b, center?, ccw?}   one entity of a closed loop
-    cutter   {shape: circle|poly|path|annulus, z0, z1}  a prism to subtract
+    cutter   {shape: circle|poly|path, z0, z1}       a prism to subtract
+             {shape: revolve, segs}                  a tool of revolution, its
+                                                     loop drawn in (r, z)
 
 Every piece is then the same two steps — build a blank from the boundary,
 subtract the cutters:
 
-    blank = prism(section)            flat pieces, one section
-          | loft(sections)            crowned / round pieces, several sections
+    blank = prism(section)            straight tread, one section
+          | loft(sections)            slanted tread, several sections
     piece = blank - every cutter
+
+The tire's running surface is one of those cutters: the crown and every
+circumferential groove, as a single solid of revolution whose profile is an
+exact arc of the section circle. Nothing about the curve is sampled.
 
 That uniformity is the point. A previous backend had to fold full-depth cuts
 into the sketch as extra loops and leave only partial-depth ones as booleans,
 because on that engine boolean count was a cliff and any operand with a curved
-face was refused outright. OpenCascade has neither limit: the busiest wheel in
-the test matrix subtracts 35 tools from a lofted solid in about a second.
+face was refused outright — which is also why the crown had to be lofted rather
+than cut, and why it came out visibly faceted. OpenCascade has neither limit.
 """
 
 import math
@@ -33,6 +39,7 @@ from OCP.BRep import BRep_Tool
 from OCP.BRepAlgoAPI import BRepAlgoAPI_Cut
 from OCP.BRepBuilderAPI import (
     BRepBuilderAPI_MakeEdge,
+    BRepBuilderAPI_Transform,
     BRepBuilderAPI_MakeFace,
     BRepBuilderAPI_MakeVertex,
     BRepBuilderAPI_MakeWire,
@@ -41,24 +48,44 @@ from OCP.BRepCheck import BRepCheck_Analyzer
 from OCP.BRepGProp import BRepGProp
 from OCP.BRepMesh import BRepMesh_IncrementalMesh
 from OCP.BRepOffsetAPI import BRepOffsetAPI_ThruSections
-from OCP.BRepPrimAPI import BRepPrimAPI_MakePrism
+from OCP.BRepPrimAPI import BRepPrimAPI_MakePrism, BRepPrimAPI_MakeRevol
 from OCP.GC import GC_MakeArcOfCircle
 from OCP.GProp import GProp_GProps
 from OCP.STEPControl import STEPControl_StepModelType, STEPControl_Writer
+from OCP.ShapeUpgrade import ShapeUpgrade_UnifySameDomain
 from OCP.StlAPI import StlAPI_Writer
 from OCP.TopoDS import TopoDS
 from OCP.TopTools import TopTools_ListOfShape
-from OCP.gp import gp_Ax2, gp_Circ, gp_Dir, gp_Pln, gp_Pnt, gp_Vec
+from OCP.gp import gp_Ax1, gp_Ax2, gp_Circ, gp_Dir, gp_Pln, gp_Pnt, gp_Trsf, gp_Vec
 
 # Chord height allowed when the solid is triangulated for STL. Well under a
 # printer's nozzle, and under the planner's own 1e-3 mm coordinate grid.
 STL_DEFLECTION = 0.05
 STL_ANGULAR = 0.3
 
+# How near two things have to be before the boolean should treat them as
+# touching. The planner rounds every coordinate to 1e-3 mm, so nothing finer
+# than that is real, and left at its default the kernel goes hunting for
+# intersections down at 1e-7 that the input never expressed — which is where
+# it produces slivers. Two crowned wheels in the test matrix came out with
+# zero-thickness fragments on a face and a handful of non-manifold edges in
+# their STL; at 1e-3 both are clean, with the volume unchanged to the decimal.
+# It is still a thousand times finer than the thinnest wall the planner will
+# lay down, so nothing real can be merged away by it.
+BOOLEAN_FUZZ = 1e-3
+
 
 # --------------------------------------------------------------- 2D primitives
 
-def _pnt(xy, z=0.0):
+def _pnt(xy, z=0.0, plane="xy"):
+    """Place a 2D loop point in space.
+
+    A section or a prismatic cutter is drawn in an XY plane at height z. A
+    revolved tool's profile is drawn in the (r, z) half-plane instead, which is
+    the XZ plane at y = 0 — r becomes x, and the sweep is about Z.
+    """
+    if plane == "xz":
+        return gp_Pnt(float(xy[0]), 0.0, float(xy[1]))
     return gp_Pnt(float(xy[0]), float(xy[1]), float(z))
 
 
@@ -122,7 +149,7 @@ def _oriented(wire, is_ccw, want_ccw):
     return wire if is_ccw == want_ccw else TopoDS.Wire_s(wire.Reversed())
 
 
-def wire_from_segs(segs, z=0.0, ccw=True):
+def wire_from_segs(segs, z=0.0, ccw=True, plane="xy"):
     """Close a {line, arc} loop into a wire, chaining through shared vertices.
 
     Consecutive entities in a plan loop share their endpoint *exactly* — the
@@ -146,7 +173,7 @@ def wire_from_segs(segs, z=0.0, ccw=True):
     n = len(segs)
     if n < 2:
         raise ValueError("a loop needs at least two entities")
-    verts = [BRepBuilderAPI_MakeVertex(_pnt(s["a"], z)).Vertex() for s in segs]
+    verts = [BRepBuilderAPI_MakeVertex(_pnt(s["a"], z, plane)).Vertex() for s in segs]
     mk = BRepBuilderAPI_MakeWire()
     for i, s in enumerate(segs):
         v0, v1 = verts[i], verts[(i + 1) % n]
@@ -155,7 +182,7 @@ def wire_from_segs(segs, z=0.0, ccw=True):
         else:
             c, r, t0, sweep = _arc_params(s)
             tm = t0 + sweep / 2.0
-            mid = _pnt((c[0] + r * math.cos(tm), c[1] + r * math.sin(tm)), z)
+            mid = _pnt((c[0] + r * math.cos(tm), c[1] + r * math.sin(tm)), z, plane)
             curve = GC_MakeArcOfCircle(
                 BRep_Tool.Pnt_s(v0), mid, BRep_Tool.Pnt_s(v1)
             ).Value()
@@ -183,10 +210,12 @@ def wire_poly(pts, z=0.0, ccw=True):
     return _oriented(mk.Wire(), _signed_area([tuple(p) for p in pts]) > 0, ccw)
 
 
-def face_of(outer, holes=(), z=0.0):
+def face_of(outer, holes=(), z=0.0, plane="xy"):
     """A planar face at height z. `outer` arrives CCW and `holes` CW, so the
     material side is decided by the windings rather than by a repair pass."""
-    mk = BRepBuilderAPI_MakeFace(gp_Pln(gp_Pnt(0, 0, z), gp_Dir(0, 0, 1)), outer)
+    pln = (gp_Pln(gp_Pnt(0, 0, 0), gp_Dir(0, -1, 0)) if plane == "xz"
+           else gp_Pln(gp_Pnt(0, 0, z), gp_Dir(0, 0, 1)))
+    mk = BRepBuilderAPI_MakeFace(pln, outer)
     for h in holes:
         mk.Add(h)
     return mk.Face()
@@ -209,21 +238,53 @@ def cutter_wires(cut, z, ccw=True):
         return wire_poly(cut["pts"], z, ccw), []
     if shape == "path":
         return wire_from_segs(cut["segs"], z, ccw), []
-    if shape == "annulus":
-        return (wire_circle((0, 0), cut["rOut"], z, ccw),
-                [wire_circle((0, 0), cut["rIn"], z, not ccw)])
     raise ValueError(f"unknown cutter shape {shape!r}")
 
 
-def cutter_prism(cut, width):
-    """One cutter as a solid prism.
+def revolve_cutter(cut):
+    """A tool of revolution — the tire's running surface.
 
-    Every cutter is prismatic: the planner never varies a cut with height, only
-    the piece's outer boundary. Cuts that run the full width overshoot the body
-    by 1 mm at each end, because a tool face exactly coplanar with the body's
-    is a classic way to make a boolean ambiguous.
+    The profile is a closed loop in the (r, z) half-plane: up the finished
+    surface (crown arcs, and a groove floor wherever one falls), then out past
+    the rim and back. Swept a full turn about the wheel axis, it removes
+    everything outside that surface. Because the crown is carried as a real arc
+    rather than sampled at a few heights, the result is exact at any width —
+    the lofted approximation it replaces was 2.99 mm off at the shoulder of a
+    Ø200 round section, more than that tread was deep.
+
+    The loop closes beyond both faces of the piece, so no face of the tool is
+    ever coplanar with a face of the body. `seam` handles the same hazard in
+    the other direction: a full revolution's seam is a real edge, and a
+    boolean whose body has a planar face in that seam's plane silently does
+    nothing at all — the planner picks an angle the piece has no radial face
+    at, and the profile is turned to it before sweeping.
     """
-    through = cut["shape"] != "annulus" and cut["z0"] <= 0 and cut["z1"] >= width
+    axis = gp_Ax1(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1))
+    face = face_of(wire_from_segs(cut["segs"], plane="xz"), (), plane="xz")
+    seam = float(cut.get("seam", 0.0))
+    if seam:
+        turn = gp_Trsf()
+        turn.SetRotation(axis, math.radians(seam))
+        face = BRepBuilderAPI_Transform(face, turn, True).Shape()
+    solid = BRepPrimAPI_MakeRevol(face, axis).Shape()
+    # A revolve inherits its profile face's orientation, and which way round
+    # that comes out depends on the plane's own axes rather than on anything
+    # the planner controls. An inverted tool would add material instead of
+    # removing it, and the only symptom is the sign of its volume.
+    return solid if volume(solid) > 0 else solid.Reversed()
+
+
+def cutter_solid(cut, width):
+    """One cutter as a solid.
+
+    Everything but the tire is prismatic: the planner never varies those cuts
+    with height, only the piece's outer boundary. Cuts that run the full width
+    overshoot the body by 1 mm at each end, because a tool face exactly
+    coplanar with the body's is a classic way to make a boolean ambiguous.
+    """
+    if cut["shape"] == "revolve":
+        return revolve_cutter(cut)
+    through = cut["z0"] <= 0 and cut["z1"] >= width
     z0 = -1.0 if through else float(cut["z0"])
     z1 = width + 1.0 if through else float(cut["z1"])
     outer, holes = cutter_wires(cut, z0)
@@ -264,14 +325,33 @@ def build(sections, cutters, width):
     args, tools = TopTools_ListOfShape(), TopTools_ListOfShape()
     args.Append(blank)
     for cut in cutters:
-        tools.Append(cutter_prism(cut, float(width)))
+        tools.Append(cutter_solid(cut, float(width)))
     op.SetArguments(args)
     op.SetTools(tools)
     op.SetRunParallel(True)
+    op.SetFuzzyValue(BOOLEAN_FUZZ)
     op.Build()
     if not op.IsDone():
         raise RuntimeError("boolean subtract failed")
-    return op.Shape()
+    return _unify(op.Shape())
+
+
+def _unify(shape):
+    """Merge the redundant face splits a boolean leaves behind.
+
+    Cutting a curved surface tends to hand it back as several faces on the same
+    underlying geometry, and occasionally as two faces covering the *same*
+    patch — which triangulates to duplicate triangles and an STL that is not a
+    closed manifold. On the crowned Ø200 lugged wheel that showed up as two
+    edges belonging to four triangles each.
+
+    Merging faces that share a surface is a change of topology only, so nothing
+    about the solid moves. It also leaves fewer faces to mesh and a smaller
+    STEP file.
+    """
+    unify = ShapeUpgrade_UnifySameDomain(shape, True, True, False)
+    unify.Build()
+    return unify.Shape()
 
 
 # ------------------------------------------------------------------- reporting

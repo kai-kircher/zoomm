@@ -25,8 +25,8 @@ and the glue-up instructions.
 - **Pick a tread**: lugged (straight bars), angled, chevron / V-bar, ribbed, diamond, or slick —
   with bar count, bar angle, rib count and depth all settable.
 - **Pick a cross-section**: flat cylindrical, crowned by a settable drop, or a full round
-  bicycle-tire section. The tread rides the curve, so bars fade out towards the shoulders the way
-  a moulded tire's do.
+  bicycle-tire section — cut as an exact arc of the section circle, not approximated. The tread
+  rides the curve, so bars fade out towards the shoulders the way a moulded tire's do.
 - **Pick a web**: solid, spokes, or one of the four [airless patterns](#the-airless-webs) —
   honeycomb, interlaced lattice, auxetic re-entrant, or voronoi. Each carries its own parameter
   group (cell size, wall, orientation, corner rounding…) and each guarantees a minimum wall
@@ -268,7 +268,7 @@ engine no more than a slick one.
 | `treadDepth` | `3.5` mm | How deep the bars and grooves cut, measured from the tread surface. |
 | `treadCount` | `0` (auto) | Bars around the whole wheel, snapped to a multiple of the segment count. Auto works out to roughly one bar every 20 mm of circumference. |
 | `treadAngle` | `25`° | Bar slant off the wheel's axis (`angled`, `chevron`). See below. |
-| `ribCount` | `0` (auto) | Circumferential grooves across the width. Auto is one per 14 mm. |
+| `ribCount` | `0` (auto) | Circumferential grooves across the width, up to 6. Auto is one per 14 mm. A crowned tread takes as many as a flat one — they ride the same revolved tool. |
 
 A bar can only lean as far as its own pitch cell allows before neighbouring bars merge. When
 `treadCount` is on auto the planner honours the angle you asked for and **spaces the bars out**
@@ -343,10 +343,17 @@ if __name__ == "__main__":
 `build()` does the same two things for every wheel there is:
 
 ```python
-blank = prism(SECTIONS[0], W)      # flat: one section
-      | loft(SECTIONS)             # crowned or round: several
-piece = blank - [prism(c) for c in CUTTERS]
+blank = prism(SECTIONS[0], W)      # straight tread: one section
+      | loft(SECTIONS)             # slanted tread: several
+piece = blank - [solid(c) for c in CUTTERS]
 ```
+
+Every cutter but one is a prism. The exception is the **tire** — the crown and every
+circumferential groove together — whose profile is drawn in the (r, z) half-plane and swept a
+full turn about the axle, so the running surface comes out as a real arc of the section circle.
+Lofting it through sampled heights, which is what a kernel that refuses booleans on curved faces
+forces you into, left the Ø200 round preset **2.99 mm** short at the shoulder — more than that
+tread was deep. The revolve measures 0.0000 mm out on the built STL.
 
 **The bundle builds itself.** Alongside the pieces it carries `wheelwright_occ.py` and
 `build.py` — the geometry code, shipped verbatim. `python build.py .` writes an `.stl` (for
@@ -417,23 +424,24 @@ test/                         node:test suite
 - Wheel width taller than the printer Z is warned, not yet auto-split axially.
 - Tread/tenon edges are sharp (no chamfered lead-ins yet); slicers' seam-aware placement and a
   light file fix the first-fit experience.
-- The preview draws tread bars and the crown exactly (both are in the piece profile, and crowned
-  pieces are lofted in the preview too). Circumferential grooves are still an overlay; the build
-  subtracts them for real, so a ribbed wheel's preview reads ~1–2 % heavier than its solid.
-- Crowned and round cross-sections are the slow end of the build — a couple of seconds a piece
-  against a fraction of one for a flat wheel. That is a different constant, not a different
-  order of magnitude.
+- The preview draws the tread bars, the crown and the grooves for real — nothing is overlaid on
+  top of the mesh any more. It samples the crown at 40-odd heights spaced by equal arc angle,
+  where the solid carries it as an exact arc, so the mesh is an approximation of the same curve
+  rather than of a different one.
 - A bar can only lean as far as its own pitch cell allows. Ask for a steep chevron and the
   planner spaces the bars out to grant it; pin the bar count as well and the angle gives way
   instead, with a note saying so.
-- Circumferential grooves on a crowned tread are modelled into the section curve, so they come
-  out round-shouldered rather than square, and the count is capped at two (each groove costs
-  three more profiles to loft through).
-- **The crown is still lofted rather than cut, and the planner still keeps its sections
-  congruent for it.** Both were forced by the old engine's refusal to boolean against curved
-  faces. OpenCascade would take the cut, which would retire the congruence rule and the
-  2 520-combination test that guards it — the largest simplification still on the table, and
-  not yet taken up.
+- Circumferential grooves are cut to a constant depth measured *perpendicular* to the tread, so
+  on a crowned tire they sit a little shallower in radius near the shoulders than at the
+  centreline. That is what a moulded groove does; a constant radial depth would run out through
+  the shoulder.
+- A **slanted tread** (`angled`, `chevron`) is the one thing left that varies the piece profile
+  with height, so it is the only case that still lofts and the only one the section-congruence
+  rule still binds. Everything else — crowned and round sections included — is a single prism
+  plus one revolved cut.
+- The preview reads **1–3 % light on a slanted tread**: it samples each profile as a polyline and
+  rules between the sampled rings, where the kernel lofts the exact wires. On every other
+  configuration it now agrees with the built solid to better than 0.1 %.
 - Building needs a Python 3.9–3.13 with `cadquery-ocp` (~400 MB installed). `npm run setup:occ`
   handles it, but it is a real second runtime next to Node. On Windows, keep the venv path
   short: OpenCascade's DLLs hit `MAX_PATH` under a deep checkout, and the setup script warns

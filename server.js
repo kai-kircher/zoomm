@@ -25,7 +25,10 @@ app.use(express.json({ limit: '1mb' }));
 app.use(express.static(join(__dirname, 'public')));
 // The browser imports the same planner and generator the server uses, and
 // fetches the same runtime Python to put in the bundles it builds client-side.
-app.use('/lib', express.static(join(__dirname, 'src', 'lib')));
+// Mounted at its real path so that `../src/lib/…` — the relative import
+// `public/preview.js` needs in order to also load under `node --test` —
+// resolves to the same URL here, and the browser gets one module instance.
+app.use('/src/lib', express.static(join(__dirname, 'src', 'lib')));
 
 const handle = (fn) => (req, res) => {
   try {

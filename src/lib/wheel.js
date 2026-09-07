@@ -9,8 +9,9 @@
 //
 // The output "plan" contains, per unique piece, a 2D outline (lines + arcs,
 // dovetail tenons/pockets integrated) and a list of cutter prisms
-// (profile + z-range). Both the KCL generator and the Three.js preview
-// consume this same plan, so the preview matches the generated CAD.
+// (profile + z-range), plus one tool of revolution for the tire's running
+// surface. Both the build-script generator and the Three.js preview consume
+// this same plan, so the preview matches the generated CAD.
 
 export const IN = 25.4;
 
@@ -18,8 +19,8 @@ export const IN = 25.4;
 const WEB_STYLES = ['solid', 'spokes', 'honeycomb', 'flexweb', 'lattice', 'auxetic', 'voronoi'];
 
 // Per-segment void budget for the chart-drawn webs. Every void is a boolean
-// tool in the generated KCL, so the count has to stay somewhere the engine
-// (and the browser preview's triangulator) is comfortable.
+// tool downstream, so the count has to stay somewhere the kernel (and the
+// browser preview's triangulator) is comfortable.
 const WEB_CELL_CAP = 120;
 
 const d2r = (d) => (d * Math.PI) / 180;
@@ -463,9 +464,9 @@ function pointInLoop(pt, poly) {
 }
 
 // A closed XY point loop as a 'path' cutter. Consecutive duplicates are
-// dropped so the emitted KCL carries no zero-length entities, and the region
+// dropped so the emitted loop carries no zero-length entities, and the seed
 // seed is checked against the finished loop — a cell whose seed a corner
-// fillet ate into is dropped rather than emitted as KCL the engine cannot
+// fillet ate into is dropped rather than emitted as a loop the kernel cannot
 // resolve.
 function loopCutter(id, pts, interior, z) {
   const q = [];
@@ -546,6 +547,10 @@ export function planWheel(input = {}) {
   const barred = BARRED.includes(p.tread);
   const ribbed = ['ribbed', 'diamond'].includes(p.tread);
   const treadCut = p.tread === 'slick' ? 0 : p.treadDepth;
+  // Groove depth, measured perpendicular to the tread surface. Declared here
+  // rather than with the rest of the groove layout because the band model
+  // below needs it.
+  const ribDepth = ribbed ? p.treadDepth * 0.85 : 0;
 
   // -------------------------------------------------------------------------
   // Tire cross-section (the crown)
@@ -556,12 +561,26 @@ export function planWheel(input = {}) {
   //   crowned — a settable fall, like a car tire's shouldered section
   //   round   — the fall equals the half-width, so the section is a true
   //             semicircle: a bicycle tire.
-  // Everything on the tread rides this curve, bar floors included, so a
-  // crowned wheel's bars fade out towards the shoulders the way a moulded
-  // tire's do. It is built into the piece's own profile and lofted rather
-  // than cut with a revolved tool. That was once forced — the hosted KCL
-  // engine refused any boolean whose operands carried curved faces — and is
-  // now a choice OpenCascade would let us revisit; see architecture.md §12.
+  //
+  // The curve is **cut, not drawn**. The piece profile is flat, and a single
+  // revolved tool (`tire`, below) takes the crown and every circumferential
+  // groove out of it in one pass, so the finished running surface is an exact
+  // arc of the section circle.
+  //
+  // It used to be lofted through a handful of profiles instead, because the
+  // hosted KCL engine refused any boolean whose operands carried curved faces.
+  // That was not merely more complicated, it was wrong: a ruled loft through
+  // uniformly spaced z levels is a bad way to approximate a circle, because a
+  // circular section curves hardest at the shoulders — exactly where uniform
+  // sampling is thinnest. On the Ø200 × 28 round preset it left the shoulder
+  // 2.99 mm off the true arc, more than that tread was deep. A revolve has no
+  // such error at any width.
+  //
+  // The bars are a consequence rather than a special case: their windows are
+  // notched into the flat profile at a constant floor radius, and where the
+  // crown falls past that floor it simply takes the window with it. So bars
+  // stand full-depth at the centreline and fade out towards the shoulders,
+  // the way a moulded tire's do.
   const crownWanted = p.profile.shape === 'round' ? halfW : p.profile.shape === 'crowned' ? (p.profile.crownDrop > 0 ? p.profile.crownDrop : clamp(W * 0.12, 1, halfW)) : 0;
   // The crown eats radius before the tread does, so it has to leave a rim
   // band and a web behind it.
@@ -576,9 +595,29 @@ export function planWheel(input = {}) {
   const crownRadius = crownDrop > 0 ? (halfW ** 2 + crownDrop ** 2) / (2 * crownDrop) : 0;
   const crownAt = (z) =>
     crownDrop > 0 ? R - crownRadius + Math.sqrt(Math.max(0, crownRadius ** 2 - (z - halfW) ** 2)) : R;
+  // The same section circle shrunk by `depth`, i.e. the surface a cutter of
+  // that depth leaves behind. Concentric with the crown, so the depth it takes
+  // is measured perpendicular to the tread — a groove of constant depth, not
+  // one that deepens towards the shoulders. On a flat profile it is just an
+  // inset cylinder.
+  const surfaceR = (z, depth = 0) =>
+    crownDrop > 0
+      ? R - crownRadius + Math.sqrt(Math.max(0, (crownRadius - depth) ** 2 - (z - halfW) ** 2))
+      : R - depth;
+
+  // Radius of the finished running surface at height z: the crown arc, less a
+  // groove where one falls. `grooveAt` is filled in once the groove bands are
+  // laid out below; until then the crown is the whole story.
+  let grooveAt = () => 0;
+  const surfAt = (z) => crownAt(z) - grooveAt(z);
 
   // Radial bands: [bore .. hub ring .. web (infill) .. rim ring .. tread .. R]
-  const treadEff = crownDrop + treadCut;
+  // The crown and the bar windows *overlap* rather than stack: a window floor
+  // is flat at R − treadCut, and where the crown falls past it the crown wins.
+  // So the rim band sits under whichever of the two is deeper, not under their
+  // sum — which is what the lofted crown had to assume, and which cost every
+  // crowned wheel a band of radius it never actually used.
+  const treadEff = Math.max(treadCut, crownDrop + ribDepth);
   const rimBandT = clamp(R * 0.05, 6, 14);
   const rRimIn = R - treadEff - rimBandT;
 
@@ -881,41 +920,37 @@ export function planWheel(input = {}) {
   // engine hangups) on anything busier.
   const treadInfo = { style: p.tread, crown: p.profile.shape };
 
-  // Circumferential grooves. On a flat profile they stay prismatic cutters —
-  // cheap, and sharp-shouldered. On a crowned one nothing may be subtracted
-  // from the piece at all (the loft leaves it with curved faces, which the
-  // engine's booleans reject outright), so they are rolled into the section
-  // radius instead and come out with rounded shoulders — which is what a
-  // moulded tire's rain grooves look like anyway.
-  const ribDepth = ribbed ? p.treadDepth * 0.85 : 0;
+  // Circumferential grooves. They are bands of the revolved tire tool: a
+  // groove floor is the crown arc offset inward by `ribDepth`, which is a
+  // constant depth measured perpendicular to the tread surface — what a
+  // moulded groove actually is. Since the whole tire is one tool whatever it
+  // carries, groove count costs nothing, and a crowned profile takes as many
+  // as a flat one. (It used to cap crowned wheels at two, because each groove
+  // was a parabolic dip in the section curve and each dip cost three more
+  // profiles to loft through.)
   const ribHalfW = 1.2;
   const ribZ = [];
   if (ribbed) {
-    const gMax = crownDrop > 0 ? 2 : 6; // a crowned groove costs three z levels
-    const g = clamp(p.ribCount > 0 ? p.ribCount : Math.round(W / 14), 1, gMax);
+    const g = clamp(p.ribCount > 0 ? p.ribCount : Math.round(W / 14), 1, 6);
     if (p.ribCount > 0 && g !== p.ribCount) {
-      notes.push(
-        crownDrop > 0
-          ? `Rib count reduced ${p.ribCount} → ${g}; on a crowned profile each groove is modelled into the section curve, and more would make the export crawl.`
-          : `Rib count reduced ${p.ribCount} → ${g} to keep the grooves clear of the wheel's edges.`
-      );
+      notes.push(`Rib count reduced ${p.ribCount} → ${g} to keep the grooves clear of the wheel's edges.`);
     }
     const edge = clamp(W * 0.12, 3, 10);
     for (let i = 0; i < g; i++) ribZ.push(rnd(g === 1 ? halfW : edge + (i * (W - 2 * edge)) / (g - 1), 4));
     treadInfo.ribs = g;
     treadInfo.ribDepth = rnd(ribDepth, 2);
   }
-  // Groove depth at height z, for the crowned case only — a parabolic dip so
-  // the three levels each groove contributes land on a consistent curve.
-  const ribDropAt = (z) => {
-    if (!(crownDrop > 0) || !ribZ.length) return 0;
-    let d = 0;
-    for (const zc of ribZ) {
-      const t = Math.abs(z - zc) / ribHalfW;
-      if (t < 1) d = Math.max(d, ribDepth * (1 - t * t));
-    }
-    return d;
-  };
+  // Groove bands as [z0, z1], clipped to the wheel and merged where they touch
+  // — the tire profile walks them in order and must never double back.
+  const ribBands = [];
+  for (const zc of ribZ) {
+    const band = [clamp(zc - ribHalfW, 0, W), clamp(zc + ribHalfW, 0, W)];
+    if (band[1] - band[0] < 1e-6) continue;
+    const last = ribBands[ribBands.length - 1];
+    if (last && band[0] <= last[1] + 1e-9) last[1] = Math.max(last[1], band[1]);
+    else ribBands.push(band);
+  }
+  grooveAt = (z) => (ribBands.some(([a, b]) => z >= a - 1e-9 && z <= b + 1e-9) ? ribDepth : 0);
 
   let barCount = 0;
   let barsPerSeg = 0;
@@ -928,7 +963,7 @@ export function planWheel(input = {}) {
     // Window half-width and the room a bar has to lean, for a given count.
     const slotFor = (cnt) => clamp(((Math.PI * p.diameter) / cnt) * 0.32, 2.5, 8);
     // The window is widest in angle at the smallest radius it reaches.
-    const halfFor = (cnt) => r2d(Math.asin(clamp(slotFor(cnt) / 2 / Math.max(R - crownDrop - treadCut, 1), 0, 1)));
+    const halfFor = (cnt) => r2d(Math.asin(clamp(slotFor(cnt) / 2 / Math.max(R - treadCut, 1), 0, 1)));
     const roomFor = (cnt) => (360 / cnt) * 0.45 - halfFor(cnt);
     // How far a window centre actually strays from its nominal angle. An
     // angled bar leans one way across the whole width; a chevron's two arms
@@ -954,9 +989,9 @@ export function planWheel(input = {}) {
     if (wantShift > 0) {
       barShift = wantShift;
       // A window may never leave its own pitch cell. Bars would otherwise
-      // merge — and, just as fatally, the sections would stop matching one
-      // another, which is exactly what the loft needs to raise a surface
-      // between them.
+      // merge — and a window that ran off the end of a sector would change the
+      // profile's entity count from level to level, which a slanted tread's
+      // loft cannot raise a surface between.
       const maxShift = Math.max(0, roomFor(barCount) / (strayOf(1) || 1));
       if (barShift > maxShift + 1e-9) {
         barShift = maxShift;
@@ -982,30 +1017,40 @@ export function planWheel(input = {}) {
   // -------------------------------------------------------------------------
   // Sections (canonical piece frame: sector spans [0°, A°])
   // -------------------------------------------------------------------------
-  // One z level extrudes; several loft. Levels are only added when the outer
-  // boundary actually varies with height, because each one is another surface
-  // the engine has to fit and that dominates export time.
+  // One z level extrudes; several loft. The only thing that still varies the
+  // profile with height is a *slanted* tread — the crown and the grooves left
+  // the profile for the revolved tire tool, so every straight-barred wheel is
+  // a single prism now, crowned or not.
   const crowned = crownDrop > 0;
+
+  // How far past the finished radius the blank is drawn, when a tire tool is
+  // going to trim it back.
+  //
+  // The tool's inner surface *is* the finished surface, so a blank drawn at
+  // exactly R meets it tangentially along the mid-width circle — where the
+  // crown is at full radius — and coincides with it outright on a flat,
+  // grooved tread. OpenCascade's boolean handles neither: measured on a
+  // Ø355.6 crowned wheel with a slanted tread, the cut left the blank's
+  // 813 972.2 mm³ untouched at every seam angle. Lifting the blank clear makes
+  // the tool cross it transversally at every height instead, which is the same
+  // reason prismatic cutters overshoot the piece in Z.
+  //
+  // 0.05 mm: five hundred times the kernel's tolerance, a twentieth of the
+  // planner's own grid, and gone from the finished solid — the tire cuts it
+  // all away. The footprint quoted to the user is measured without it.
+  const rimOver = crowned || ribBands.length ? 0.05 : 0;
+
   const zSet = new Set([0, W]);
-  if (crowned && ribZ.length) {
-    // The grooves' own levels already sample the crown right across the
-    // width, so skip the uniform pass and just pin the mid-width peak.
-    zSet.add(rnd(halfW, 4));
-    for (const zc of ribZ) for (const dz of [-ribHalfW, 0, ribHalfW]) zSet.add(rnd(clamp(zc + dz, 0, W), 4));
-  } else if (crowned) {
-    const steps = p.profile.shape === 'round' ? 6 : 4;
-    for (let i = 1; i < steps; i++) zSet.add(rnd((W * i) / steps, 4));
-  }
   if (barShift && p.tread === 'chevron') zSet.add(rnd(halfW, 4));
-  const zLevels = crowned || barShift ? [...zSet].sort((x, y) => x - y) : [0];
+  const zLevels = barShift ? [...zSet].sort((x, y) => x - y) : [0];
 
   // Outer boundary of one section, walking CCW from `from` to `to` degrees.
   // Windows never reach either end (see the maxShift clamp above), so the
   // boundary always starts and ends on the crown radius and the sector faces
   // can meet it without knowing anything about the tread.
-  const outerAt = (z, from, to) => {
-    const Ro = crownAt(z) - ribDropAt(z);
-    const Ri = Ro - treadCut;
+  const outerAt = (z, from, to, over = rimOver) => {
+    const Ro = R + over;
+    const Ri = R - treadCut;
     const segs = [];
     const ph = barPhase(z);
     // A zero-sweep arc is a degenerate entity the engine rejects, and the ring
@@ -1040,16 +1085,16 @@ export function planWheel(input = {}) {
   const seedPt = polar(rRimIn + rimBandT / 2, N === 1 ? 90 : A / 2);
 
   const jc = p.joint.clearance;
-  const sectionAt = (z) => {
+  const sectionAt = (z, over = rimOver) => {
     if (N === 1) {
-      if (!barCount) return { z: rnd(z, 4), kind: 'circle', r: rnd(crownAt(z) - ribDropAt(z)), interior: seedPt.map((v) => rnd(v)) };
+      if (!barCount) return { z: rnd(z, 4), kind: 'circle', r: rnd(R + over), interior: seedPt.map((v) => rnd(v)) };
       // Start the ring on the first window's leading edge so the wrap-around
       // gap is one ordinary arc — a full-turn arc with coincident ends is
       // degenerate and the engine rejects it.
       const start = barPhase(z) + 0.5 * barPitch - barHalf;
-      return { z: rnd(z, 4), kind: 'ring', segs: outerAt(z, start, start + 360), interior: seedPt.map((v) => rnd(v)) };
+      return { z: rnd(z, 4), kind: 'ring', segs: outerAt(z, start, start + 360, over), interior: seedPt.map((v) => rnd(v)) };
     }
-    const Ro = crownAt(z) - ribDropAt(z);
+    const Ro = R + over;
     const segs = [];
     const asc = [...joints];
     const desc = [...joints].reverse();
@@ -1072,7 +1117,7 @@ export function planWheel(input = {}) {
     segs.push({ kind: 'line', a: P, b: [rnd(Ro), 0] });
     // Outer boundary, CCW 0 → A: the crown arc for this height with the tread
     // windows notched into it.
-    segs.push(...outerAt(z, 0, A));
+    segs.push(...outerAt(z, 0, A, over));
     // Face A (male tenons), walking inward.
     const u = [Math.cos(d2r(A)), Math.sin(d2r(A))];
     const t = [-Math.sin(d2r(A)), Math.cos(d2r(A))]; // out of the piece
@@ -1794,40 +1839,87 @@ export function planWheel(input = {}) {
   }
 
   // Tread. The bars live in the section profiles (see outerAt above) and cost
-  // nothing to build. Circumferential grooves on a *flat* profile are the one
-  // tread feature that still needs a cutter — and it is deliberately a wedge
-  // spanning just this piece, not a full ring: subtracting a 360° ring from a
-  // 60° sector is a sliver boolean, and that is what used to hang the engine
-  // past its five-minute budget on a plain ribbed wheel.
-  if (ribbed && !crowned) {
-    const pad = N === 1 ? 0 : r2d(2 / Math.max(rRimIn, 1));
-    for (let i = 0; i < ribZ.length; i++) {
-      const zc = ribZ[i];
-      const g = {
-        id: `groove${i + 1}`,
-        rIn: rnd(R - ribDepth),
-        rOut: rnd(R + 2),
-        z0: rnd(zc - ribHalfW),
-        z1: rnd(zc + ribHalfW),
-      };
-      if (N === 1) {
-        shared.push({ ...g, shape: 'annulus' });
-      } else {
-        const a0 = -pad;
-        const a1 = A + pad;
-        shared.push({
-          ...g,
-          shape: 'path',
-          segs: [
-            { kind: 'line', a: polar(g.rIn, a0), b: polar(g.rOut, a0) },
-            { kind: 'arc', a: polar(g.rOut, a0), b: polar(g.rOut, a1), center: [0, 0], radius: g.rOut, ccw: true },
-            { kind: 'line', a: polar(g.rOut, a1), b: polar(g.rIn, a1) },
-            { kind: 'arc', a: polar(g.rIn, a1), b: polar(g.rIn, a0), center: [0, 0], radius: g.rIn, ccw: false },
-          ].map((s) => ({ ...s, a: s.a.map((v) => rnd(v)), b: s.b.map((v) => rnd(v)) })),
-          interior: polar((g.rIn + R) / 2, A / 2).map((v) => rnd(v)),
-        });
-      }
+  // nothing to build.
+  //
+  // The running surface — the crown and every circumferential groove — is one
+  // revolved tool. Its profile is drawn in the (r, z) half-plane and swept
+  // about the wheel axis, so the crown comes out as an exact arc of the
+  // section circle and a groove floor as that same arc offset inward. One
+  // tool however many grooves there are, and no approximation anywhere.
+  //
+  // A flat, ungrooved tread needs no tool at all: the piece profile already
+  // *is* the finished surface, so those wheels stay a single prism.
+  if (crowned || ribBands.length) {
+    // Walk the width as alternating [z0, z1, depth] runs: crown, groove,
+    // crown, … Each run is one entity; the step between two runs is the
+    // groove's wall.
+    const runs = [];
+    let at = 0;
+    for (const [a, b] of ribBands) {
+      if (a - at > 1e-6) runs.push([at, a, 0]);
+      runs.push([Math.max(a, at), b, ribDepth]);
+      at = b;
     }
+    if (W - at > 1e-6) runs.push([at, W, 0]);
+
+    const zLo = -1;
+    const zHi = W + 1;
+    // How far out the tool's back face sits. It only has to clear the blank,
+    // but *comfortably*: at mid-width the crown is at full radius, so a back
+    // face close in leaves a razor-thin ring of tool there and the boolean
+    // stops cutting cleanly. Measured on the Ø200 round tire, the result crept
+    // from 623 792 mm³ at R + 0.2 down to a stable 620 530 by R + 2 — the thin
+    // tool was under-cutting, not the thick one over-cutting.
+    const rOut = rnd(R + 2);
+    const crownC = [rnd(R - crownRadius), rnd(halfW)];
+    const rz = (r, z) => [rnd(r), rnd(z, 4)];
+    const segs = [];
+    let prev = null;
+    for (const [za, zb, depth] of runs) {
+      const pa = rz(surfaceR(za, depth), za);
+      const pb = rz(surfaceR(zb, depth), zb);
+      // The radial step into or out of a groove.
+      if (prev) segs.push({ kind: 'line', a: prev, b: pa });
+      segs.push(
+        crowned
+          ? { kind: 'arc', a: pa, b: pb, center: crownC, radius: rnd(crownRadius - depth), ccw: true }
+          : { kind: 'line', a: pa, b: pb }
+      );
+      prev = pb;
+    }
+    const first = segs[0].a;
+    const last = prev;
+    // Where the full revolution's seam falls, in degrees.
+    //
+    // A revolved solid's seam is a real edge of it, and OpenCascade's boolean
+    // silently does *nothing* when that seam lies in the same plane as a
+    // planar face of the body — no error, no warning, the blank simply comes
+    // back untouched. Measured on a Ø355.6 crowned sector: 825 058.7 mm³
+    // before the cut and 825 058.7 after, and 807 048.9 with the seam moved
+    // anywhere else at all.
+    //
+    // So it is parked where this piece has no radial face. A segmented wheel
+    // has two, at 0° and A°, and the roomiest spot is the far side of the
+    // wheel from them. A one-piece wheel has none except the walls of its
+    // tread windows, so the seam goes down the middle of a bar. (A *slanted*
+    // wall sweeps as it crosses the width and so can only ever touch the seam
+    // along a line, which is harmless — it is the coplanar case that bites.)
+    const seam = mod(N > 1 ? (A + 360) / 2 : barCount ? barPhase(0) : 0, 360);
+    // Close the loop out past the rim and beyond both faces, so no face of the
+    // tool is ever coplanar with a face of the piece.
+    shared.push({
+      id: 'tire',
+      shape: 'revolve',
+      seam: rnd(seam, 4),
+      segs: [
+        { kind: 'line', a: rz(first[0], zLo), b: first },
+        ...segs,
+        { kind: 'line', a: last, b: rz(last[0], zHi) },
+        { kind: 'line', a: rz(last[0], zHi), b: rz(rOut, zHi) },
+        { kind: 'line', a: rz(rOut, zHi), b: rz(rOut, zLo) },
+        { kind: 'line', a: rz(rOut, zLo), b: rz(first[0], zLo) },
+      ],
+    });
   }
 
   // -------------------------------------------------------------------------
@@ -1928,9 +2020,13 @@ export function planWheel(input = {}) {
   if (N === 1) {
     bbox = { w: rnd(p.diameter, 1), d: rnd(p.diameter, 1), rotForPrint: 0 };
   } else {
+    // Measured off a section drawn at the true radius: the blank carries a
+    // small radial overshoot that the tire tool cuts away, and the number
+    // quoted here is the piece that comes out.
+    const measured = rimOver ? sectionAt(outline.z, 0) : outline;
     const rot = 90 - A / 2;
     const pts = [];
-    for (const s of outline.segs) {
+    for (const s of measured.segs) {
       pts.push(rotPt(s.a, rot), rotPt(s.b, rot));
       if (s.kind === 'arc') {
         // arc extremes at axis-aligned angles
@@ -2012,8 +2108,16 @@ export function planWheel(input = {}) {
     profile: {
       shape: crowned ? p.profile.shape : 'flat',
       crownDrop: rnd(crownDrop, 2),
-      crownRadius: rnd(crownRadius, 1),
+      // 1e-3, the same grid every other coordinate is on: the revolved
+      // cutter is built from this curve and `tireSurfaceAt` re-derives it,
+      // so a display rounding here would put the preview and the CAD on
+      // measurably different arcs.
+      crownRadius: rnd(crownRadius, 3),
       shoulderR: rnd(R - crownDrop, 2),
+      // Enough to reconstruct the running surface anywhere across the width;
+      // `tireSurfaceAt` below is the only thing that should.
+      grooves: ribBands.map(([a, b]) => [rnd(a, 4), rnd(b, 4)]),
+      grooveDepth: rnd(ribDepth, 3),
     },
     sections,
     outline,
@@ -2032,4 +2136,56 @@ export function planWheel(input = {}) {
     warnings,
     notes,
   };
+}
+
+// Radius of the finished running surface at height z: the crown arc, less a
+// groove where one falls.
+//
+// The revolved tire tool cuts exactly this curve, and the preview has to draw
+// exactly the same one — so there is one implementation of it and both sides
+// call it. (It lives here rather than in the planner's closure because the
+// browser needs it too, and `wheel.js` is the module both runtimes share.)
+export function tireSurfaceAt(plan) {
+  const R = plan.radii.R;
+  const halfW = plan.W / 2;
+  const { crownDrop, crownRadius, grooves = [], grooveDepth = 0 } = plan.profile;
+  return (z) => {
+    const d = grooves.some(([a, b]) => z >= a - 1e-9 && z <= b + 1e-9) ? grooveDepth : 0;
+    return crownDrop > 0
+      ? R - crownRadius + Math.sqrt(Math.max(0, (crownRadius - d) ** 2 - (z - halfW) ** 2))
+      : R - d;
+  };
+}
+
+// Heights at which a renderer should sample the running surface.
+//
+// Equal *arc angle*, not equal height: a circular section curves hardest at
+// the shoulders, so uniform-in-z sampling puts its coarsest facets exactly
+// where the curve needs them finest. That is what made the lofted crown this
+// replaces 2.99 mm wrong at the shoulder of the Ø200 round preset — the CAD no
+// longer samples the curve at all, but a triangle mesh still has to.
+export function tireLevels(plan, n = 40) {
+  const W = plan.W;
+  const halfW = W / 2;
+  const { crownDrop, crownRadius, grooves = [] } = plan.profile;
+  const zs = new Set([0, W, ...plan.sections.map((s) => s.z)]);
+  // Every groove gets a level just *outside* each wall as well as on it.
+  //
+  // On the wall alone is not enough, and the failure is quiet: a level exactly
+  // on a boundary counts as inside the groove, so two neighbouring grooves'
+  // facing walls are both at groove depth and the ring between them is
+  // interpolated at groove depth too — the land between the grooves simply
+  // disappears. On a Ø355.6 × 50 tread with three grooves that lost 17 % of
+  // the piece from the preview.
+  const eps = 1e-3;
+  for (const [a, b] of grooves) {
+    for (const z of [a - eps, a, b, b + eps]) zs.add(rnd(clamp(z, 0, W), 4));
+  }
+  if (crownDrop > 0) {
+    const phi = Math.asin(clamp(halfW / crownRadius, -1, 1));
+    for (let i = 0; i <= n; i++) {
+      zs.add(rnd(clamp(halfW + crownRadius * Math.sin(-phi + (2 * phi * i) / n), 0, W), 4));
+    }
+  }
+  return [...zs].sort((a, b) => a - b);
 }

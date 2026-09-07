@@ -144,10 +144,11 @@ spaces the bars out to give you the angle you asked for — 45° on a 14″ whee
 gives 12 bars where a straight tread gives 54. Set a bar count yourself and the
 angle gives way instead, and the plan says what it settled on.
 
-**A curved profile costs a little build time.** `crowned` and `round` pieces are
-lofted through several profiles instead of extruded once, which the kernel finds
-more work: a couple of seconds a piece against a fraction of one for a flat
-wheel. The configurator says so when you pick one.
+**A curved profile is cut, not approximated.** The crown is a real arc of the
+tire's section circle, taken out of the piece by one revolved tool, so a
+`round` section is a true semicircle at any width rather than a chain of flats
+between sampled heights. It costs a second or two more to build than a flat
+wheel, and nothing in accuracy.
 
 ### Hub / mating
 
@@ -395,12 +396,16 @@ machine, and the only thing the setup step downloads is a Python package.
 
 **Is the preview the real geometry?**
 Yes — the preview and the build script come from the same plan object, and the
-preview renders the piece's true carved profile (not an approximation of it),
-including the tread bars and the crown — a crowned wheel is lofted in the
-preview exactly as it is in the CAD. The one deliberate simplification left is
-circumferential grooves, which are drawn as an overlay; the build subtracts
-them for real, so a ribbed wheel's solid comes out 1–2 % lighter than its
-preview suggests.
+preview renders the piece's true carved profile: the tread bars, the crown and
+the circumferential grooves are all in the mesh, none of them drawn on top of
+it. Where the two must differ is resolution: a triangle mesh cannot hold an
+exact arc, so the preview samples the tire's curve while the solid carries it
+whole. Both read that curve from the same function.
+
+On a wheel with a *slanted* tread the preview reads 1–3 % light, because it
+also samples each profile as a polyline and rules between them where the kernel
+lofts the exact outlines. Everywhere else it now agrees with the built solid to
+better than 0.1 %. Weigh the STL, not the preview.
 
 **Will the pieces really slide together?**
 The dovetail pockets are the tenon geometry plus your clearance per side, and

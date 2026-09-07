@@ -48,6 +48,35 @@ const CONFIGS = [
 const runtime = Object.fromEntries(
   RUNTIME_FILES.map((n) => [n, readFileSync(join(process.cwd(), 'src', 'lib', 'occ', n), 'utf8')])
 );
+
+/**
+ * Did the revolved tire tool actually remove anything?
+ *
+ * This is here because the failure it catches is silent. A boolean whose body
+ * has a planar face lying in the plane of the tool's seam — or an outer
+ * surface exactly tangent to the tool's inner one — reports success and
+ * returns the body unchanged. Every other check passes: the solid is valid,
+ * watertight, and the right shape for a wheel. It is simply not crowned.
+ *
+ * The control is the same piece built without that one tool, so the comparison
+ * is against the identical blank and cutters rather than against a different
+ * configuration. Returns null when there is no tire to check.
+ */
+function tireActuallyCuts(plan, rows) {
+  if (!plan.uniquePieces.some((u) => u.cutters.some((c) => c.shape === 'revolve'))) return null;
+  const control = {
+    ...plan,
+    uniquePieces: plan.uniquePieces.map((u) => ({
+      ...u,
+      cutters: u.cutters.filter((c) => c.shape !== 'revolve'),
+    })),
+  };
+  const before = buildPieces(generateSource(control, runtime), { formats: ['stl'] }).report.pieces;
+  return rows.every((row, i) => {
+    const uncut = before[i]?.volumeMm3 ?? 0;
+    return uncut - row.volumeMm3 > uncut * 5e-4;
+  });
+}
 const outRoot = join(process.cwd(), 'out', 'validate');
 const status = occStatus();
 console.log(
@@ -82,9 +111,13 @@ for (const [name, cfg] of CONFIGS) {
     pieces += rows.length;
     seconds += rows.reduce((s, p) => s + p.seconds, 0);
     const t = rows.reduce((s, p) => s + p.seconds, 0).toFixed(1);
+    const cut = tireActuallyCuts(plan, rows);
     if (bad.length) {
       failures++;
       console.log(`${head}  ✗ ${bad.length} piece(s) built an invalid B-rep`);
+    } else if (cut === false) {
+      failures++;
+      console.log(`${head}  ✗ the tire tool removed nothing — the crown is not in the solid`);
     } else {
       console.log(`${head}  ✓ ${t}s, ${built.length} files`);
     }

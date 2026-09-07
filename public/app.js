@@ -1,9 +1,9 @@
 // Wheelwright UI — gathers params, replans live (same planner module the
 // server uses), drives the preview, and handles source/STL downloads.
 
-import { planWheel, DEFAULTS } from '/lib/wheel.js';
-import { convertFormUnits, fromMm, isLengthInput } from '/lib/units.js';
-import { generateSource, slugFor, RUNTIME_FILES } from '/lib/occgen.js';
+import { planWheel, DEFAULTS } from '../src/lib/wheel.js';
+import { convertFormUnits, fromMm, isLengthInput } from '../src/lib/units.js';
+import { generateSource, slugFor, RUNTIME_FILES } from '../src/lib/occgen.js';
 import { createPreview } from './preview.js';
 import { enableScrub } from './scrub.js';
 
@@ -16,7 +16,7 @@ const $ = (id) => document.getElementById(id);
 const runtime = {};
 Promise.all(
   RUNTIME_FILES.map((n) =>
-    fetch(`/lib/occ/${n}`)
+    fetch(`../src/lib/occ/${n}`)
       .then((r) => (r.ok ? r.text() : null))
       .then((t) => { if (t) runtime[n] = t; })
       .catch(() => {})

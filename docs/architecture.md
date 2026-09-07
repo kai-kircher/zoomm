@@ -50,7 +50,7 @@ tests, and hand to two renderers written in different styles.
 | --- | ---: | --- |
 | `src/lib/wheel.js` | ~1810 | The planner. All geometry decisions live here. |
 | `src/lib/occgen.js` | ~330 | Plan → `piece-*.py`, `ASSEMBLY.md`, JSON manifest. |
-| `src/lib/occ/wheelwright_occ.py` | ~290 | Plan geometry → OpenCascade solid → STL/STEP. Ships in every bundle. |
+| `src/lib/occ/wheelwright_occ.py` | ~370 | Plan geometry → OpenCascade solid → STL/STEP. Ships in every bundle. |
 | `src/lib/occ/build.py` | ~110 | Builds every piece in a bundle. Ships in every bundle. |
 | `src/lib/units.js` | ~96 | mm ⇄ inch form rewriting; single source of "what is a length". |
 | `src/lib/occ.js` | ~140 | Finds a Python with OpenCascade; runs a bundle through it. |
@@ -282,31 +282,44 @@ multiples of `N` so seams land between bars.
 The **cross-section** (`profile.shape`) is `flat`, `crowned` by a settable
 `crownDrop`, or `round` — the drop taken to the half-width, giving a true
 semicircular bicycle-tire section on a circular arc of radius (h² + d²)/2d. The
-crown is applied before the tread and the bar floors ride it, so bars stand
-proud at the centreline and fade out at the shoulders as a moulded tire's do.
-The drop is capped so a rim band and a web always survive beneath it.
+drop is capped so a rim band and a web always survive beneath it.
 
-Anything that varies with height turns the piece from one profile into
-several — `plan.sections` — and those are lofted rather than extruded (§12).
-Two rules keep the loft buildable:
+The cross-section is **cut, not drawn**. The piece profile is flat, and one
+revolved tool takes the crown and every circumferential groove out of it in a
+single pass (§12), so the finished running surface is an exact arc of the
+section circle at any width. It used to be lofted through sampled heights,
+which was not merely more machinery but *wrong*: a circular section curves
+hardest at the shoulders, exactly where uniform sampling is thinnest, and on
+the Ø200 × 28 round preset that left the shoulder **2.99 mm** off the true arc
+— more than that tread was deep. Measured on the built STL, the revolve is
+0.0000 mm out.
 
-- **Sections must stay congruent.** A loft can only raise a surface between
-  profiles that match entity for entity, so a bar window may never leave its
-  own pitch cell. With an auto bar count the planner *spaces the bars out* to
-  grant the angle asked for; pin `treadCount` and the angle gives way instead,
-  with a note. `wheel.test.js` sweeps 2520 combinations asserting congruence.
-- **Circumferential grooves are a boolean on a flat profile** — the solid is
-  prismatic there — and on a crowned one they are rolled into the section
-  radius instead, as a parabolic dip: round-shouldered, and capped at two
-  because each costs three more profiles to loft through. That split was
-  forced when the old engine refused every boolean against a curved face
-  (§12); OpenCascade would now cut either, and the rolled-in dip survives
-  because it is a better-looking groove, not because it is the only one
-  available.
+Three consequences follow, and they are the point of the arrangement:
 
-Flat grooves are emitted as a **sector wedge**, not a full ring: subtracting a
-360° ring from a 60° sector is a sliver boolean, and that is what used to hang
-a plain ribbed wheel past the five-minute CLI budget.
+- **The bars are not a special case.** Their windows are notched into the flat
+  profile at a constant floor radius, and where the crown falls past that floor
+  it takes the window with it. So bars stand full-depth at the centreline and
+  fade out towards the shoulders, the way a moulded tire's do, without the
+  planner arranging it.
+- **The crown and the windows overlap rather than stack.** The rim band sits
+  under whichever of `crownDrop` and the tread depth is deeper, not under their
+  sum, which is what the lofted crown had to assume — every crowned wheel used
+  to give up a band of radius it never actually used.
+- **Grooves cost nothing.** They are runs of the same revolved profile, so a
+  crowned tread takes as many as a flat one. They used to be capped at two on a
+  crowned profile because each was a parabolic dip in the section curve and
+  each dip cost three more loft levels. A groove floor is now the section
+  circle shrunk by the groove depth, which is a constant depth measured
+  *perpendicular to the tread* — what a moulded groove actually is, and not the
+  same thing as a constant depth measured radially.
+
+What still varies the profile with height, and so still lofts, is a **slanted
+tread** — `angled` and `chevron` — and only that. Its sections must stay
+congruent: a loft can only raise a surface between profiles that match entity
+for entity, so a bar window may never leave its own pitch cell. With an auto
+bar count the planner *spaces the bars out* to grant the angle asked for; pin
+`treadCount` and the angle gives way instead, with a note. `wheel.test.js`
+sweeps 2520 combinations asserting congruence.
 
 ## 11. Bores, and the boolean we don't ask for
 
@@ -344,11 +357,16 @@ SECTIONS = [
 
 CUTTERS = [
     # bore
-    {"shape": "circle", "c": [0, 0], "r": 10.2, "z0": 0, "z1": 50},
+    {"shape": "circle", "c": [0, 0], "r": 10.2, "z0": -1, "z1": 51},
     # web void
-    {"shape": "poly", "pts": [[62.1, 14.0], …], "z0": 0, "z1": 50},
-    # groove
-    {"shape": "annulus", "rIn": 171.3, "rOut": 177.8, "z0": 12, "z1": 18},
+    {"shape": "poly", "pts": [[62.1, 14.0], …], "z0": -1, "z1": 51},
+    # tire — the crown and every groove, drawn in (r, z) and swept about the axis
+    {"shape": "revolve", "seam": 210, "segs": [
+        {"kind": "line", "a": [171.8, -1], "b": [171.8, 0]},
+        {"kind": "arc", "a": [171.8, 0], "b": [171.8, 50],
+         "center": [122.717, 25], "ccw": True},
+        …
+    ]},
 ]
 ```
 
@@ -356,10 +374,15 @@ CUTTERS = [
 is:
 
 ```python
-blank = prism(SECTIONS[0], W)      # flat: one section
-      | loft(SECTIONS)             # crowned or round: several
-piece = blank - [prism(c) for c in CUTTERS]
+blank = prism(SECTIONS[0], W)      # straight tread: one section
+      | loft(SECTIONS)             # slanted tread: several
+piece = blank - [solid(c) for c in CUTTERS]
 ```
+
+Every cutter but one is a prism. The exception is the **tire** — the running
+surface, crown and grooves together — whose profile is drawn in the (r, z)
+half-plane and swept a full turn about the axis, so the crown comes out as a
+real arc of the section circle rather than a chain of facets (§10).
 
 That uniformity is worth dwelling on, because it is not what a generator
 normally gets. Wheelwright's previous backend emitted KCL for a hosted engine,
@@ -387,12 +410,17 @@ House rules, each one earned:
 
 | Rule | Reason |
 | --- | --- |
-| Only `MakeWire`, `MakeFace`, `MakePrism`, `ThruSections`, `Cut` and the two writers | The best-trodden paths in the kernel. No fillets, no shells, no sweeps to go wrong. |
+| Only `MakeWire`, `MakeFace`, `MakePrism`, `MakeRevol`, `ThruSections`, `Cut` and the two writers | The best-trodden paths in the kernel. No fillets, no shells, no sweeps to go wrong. |
 | Endpoints are **never** moved | Consecutive entities in a loop share their endpoint exactly, and the wire is chained through shared vertices to keep it that way. The tempting repair — projecting an arc's endpoints onto a mean radius, which the KCL emitter had to do — moves them off their neighbours; `MakeWire` then returns an unclosed wire and `MakeFace` answers with a degenerate sliver instead of an error. A Ø355.6 mm sector prism measured 7 901 mm³ that way, against 612 000. |
 | Arcs are built from three points | An arc is over-determined by start, end and centre, and the planner rounds all three to 1e-3 mm independently, so the endpoints disagree about their radius by ~1e-3. Fitting a circle through start, midpoint and end needs no agreement between them. |
 | Every wire is normalised counter-clockwise | The planner walks some loops clockwise. `MakeFace` forgives that; `ThruSections` does not, and an inverted section wire lofts an inside-out solid whose only symptom is a negative volume. |
 | Loft `ruled=True` | The planner spaces its sections so straight segments between them are the intended surface; a smoothed loft would bulge the tread between bar rows. |
 | Cutters overshoot the part in Z (`z0 = −1`, `z1 = W + 1`) | A tool face exactly coplanar with the body's is a classic way to make a boolean ambiguous. |
+| The blank is drawn 0.05 mm oversize in radius whenever a tire tool will trim it | The same rule in the other direction. The tool's inner surface *is* the finished surface, so a blank drawn at exactly R meets it tangentially along the mid-width circle, and coincides with it outright on a flat grooved tread. Measured: the cut left a Ø355.6 crowned wheel's 813 972.2 mm³ untouched. Lifting the blank clear makes the tool cross it at every height. The footprint quoted to the user is measured without it. |
+| The tire's seam is parked where the piece has no radial face | A full revolution's seam is a real edge, and a boolean whose body has a planar face in that seam's plane silently does *nothing* — no error, the blank simply comes back unchanged. A segmented piece puts it on the far side of the wheel; a one-piece one puts it down the middle of a tread bar. |
+| The tire's back face sits at `R + 2` | It only has to clear the blank, but a back face close in leaves a razor-thin ring of tool at mid-width and the cut stops being clean: the result crept from 623 792 mm³ at `R + 0.2` down to a stable 620 530 by `R + 2`. |
+| Booleans run with a fuzzy value of 1e-3 mm | The planner rounds every coordinate onto that grid, so nothing finer is real. Left at the default the kernel hunts for intersections at 1e-7 that the input never expressed, and returns slivers. Still a thousand times finer than the thinnest wall the planner will lay down. |
+| The result is passed through `UnifySameDomain` | A boolean hands a cut curved surface back as several faces on the same geometry, occasionally two on the same patch — which triangulates to duplicate triangles. Merging them changes topology only, and leaves less to mesh: it took the matrix from 35 s of kernel time to 22 s. |
 | Numbers rounded to 6 decimals | A thousandth of a micron — far below any printer, and below the planner's own 1e-3 mm grid. It exists so a configuration regenerates byte-identically. |
 | Every file opens with a comment header | The file names the wheel, the piece and its print quantity, so it survives being separated from the bundle. |
 
@@ -408,14 +436,14 @@ Alongside the sources the generator emits `ASSEMBLY.md` (print settings,
 adhesive, glue-up order, build commands, warnings) and `wheelwright.json` (the
 full parameter set and piece list — the machine-readable half of the bundle).
 
-**Two constraints the planner still honours, now by choice.** The crown is
-lofted rather than cut, and circumferential grooves on a crowned profile are
-rolled into the section radius rather than subtracted (§10). Both existed
-because the old engine refused booleans against curved faces. OpenCascade would
-allow either to become a real cut, which would in turn retire the
-section-congruence requirement and the 2 520-combination test that guards it.
-The planner has not been reworked to take that up; it is the largest
-simplification still on the table.
+**The failure mode to know about.** Three of the rules above — the seam, the
+radial overshoot, the fuzzy value — exist because of the same thing: a boolean
+that reports success and returns the body unchanged, or very nearly. Nothing
+downstream notices. The solid is valid, watertight, and the right shape for a
+wheel; it is simply not crowned. So `npm run validate` builds each crowned
+configuration a second time with that one tool removed and fails the run if the
+two volumes agree. It is the only check with any teeth against a silent
+no-op.
 
 ## 13. The preview
 
@@ -463,13 +491,13 @@ code: minimum hub vertex radius equals the bore radius, no stray geometry.
 
 ## 15. Testing strategy
 
-`npm test` runs 134 `node:test` cases with no dependencies and no network:
+`npm test` runs 135 `node:test` cases with no dependencies and no network:
 
 | Suite | What it pins |
 | --- | --- |
-| `wheel.test.js` (38) | Chunking math, joint clearance, dedupe, bolt/seam clearance, bore schemes, and the web patterns' guarantees — cell-to-cell wall, no overlap, no nesting, no self-crossing loops, band containment, seam clearance, measured on the finished millimetre geometry across 31 configurations. |
+| `wheel.test.js` (68) | Chunking math, joint clearance, dedupe, bolt/seam clearance, bore schemes, and the web patterns' guarantees — cell-to-cell wall, no overlap, no nesting, no self-crossing loops, band containment, seam clearance, measured on the finished millimetre geometry across 31 configurations. |
 | `occgen.test.js` (35) | The emitted bundle across a 14-config matrix. The data blocks are read back and checked as geometry rather than as text: every loop closes to 1e-6 mm, every arc agrees with its own centre, cutters carry a sane depth range, a crowned piece emits congruent sections, and a configuration regenerates byte-identically. |
-| `preview.test.js` (10) | The rendered triangulation matches the plan (this is where phantom-cylinder-class bugs die), including that a crowned piece previews crowned, that every lofted mesh is watertight and outward-facing, and that it encloses the same volume the equivalent extrusion does — the check that catches an inverted void. |
+| `preview.test.js` (22) | The rendered triangulation matches the plan (this is where phantom-cylinder-class bugs die), including that a crowned piece previews crowned, that every lofted mesh is watertight and outward-facing, and that it encloses the same volume the equivalent extrusion does — the check that catches an inverted void. |
 | `units.test.js` (6) | mm ⇄ in round-trips, which fields are lengths, and that the form table can't drift from `LENGTH_FIELDS`. |
 | `env.test.js` (4) | `.env` parsing, and that the kernel status object keeps its shape whether or not OpenCascade is installed. |
 
@@ -482,8 +510,10 @@ D-bore, chevron and angled bars across a seam, and the two curved
 cross-sections, because those are the profile shapes the kernel sees nowhere
 else.
 
-The whole matrix currently builds **19/19, 28 pieces, 36.6 s of kernel time**,
-every piece a valid B-rep. For contrast, the same matrix against the hosted
+The whole matrix currently builds **19/19, 28 pieces, ~22 s of kernel time**,
+every piece a valid B-rep and every STL watertight. It also re-builds each
+crowned configuration without its tire tool and fails if that made no
+difference — see §12. For contrast, the same matrix against the hosted
 KCL engine managed 14/19, with the five failures being timeouts and dropped
 connections rather than geometry errors, and single pieces costing 85–146 s
 ([zoo-api-notes.md](zoo-api-notes.md#test-surface)). That gap is the reason
@@ -498,6 +528,8 @@ The planner runs on every keystroke, in the browser, on wheels up to 1.5 m:
   tens of thousands of candidates per pass.
 - Chart webs carry a per-segment void budget (120) and grow cells to meet it.
 - The UI debounces replanning by 120 ms.
+- A crowned wheel is a single prism plus one revolved cut, so it plans and
+  builds at the same cost as a flat one; only a slanted tread still lofts.
 - Cell counts are bounded for the browser's sake — the preview triangulates
   every void. Downstream they are boolean tools, but 35 of them cost the
   kernel about a second, so the budget is a rendering limit now rather than a

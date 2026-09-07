@@ -244,7 +244,7 @@ export function buildPieceShape(THREE, plan, unique, section = plan.outline) {
 }
 
 // --- crowned pieces --------------------------------------------------------
-// A crowned piece is lofted in the CAD (see kclgen.js), so the preview lofts
+// A crowned piece is lofted in the CAD (see occgen.js), so the preview lofts
 // it too rather than pretending it is a cylinder. Every section is built from
 // the same segment structure by construction, so sampling each of them with a
 // fixed number of points per segment gives matching rings that stitch

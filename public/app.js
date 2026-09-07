@@ -1,13 +1,27 @@
 // Wheelwright UI — gathers params, replans live (same planner module the
-// server uses), drives the preview, and handles KCL/STL downloads.
+// server uses), drives the preview, and handles source/STL downloads.
 
 import { planWheel, DEFAULTS } from '/lib/wheel.js';
 import { convertFormUnits, fromMm, isLengthInput } from '/lib/units.js';
-import { generateKcl, slugFor } from '/lib/kclgen.js';
+import { generateSource, slugFor, RUNTIME_FILES } from '/lib/occgen.js';
 import { createPreview } from './preview.js';
 import { enableScrub } from './scrub.js';
 
 const $ = (id) => document.getElementById(id);
+
+// The Python that makes a downloaded bundle self-building. Fetched from the
+// same /lib the server reads off disk, so the per-file links below hand out
+// exactly the bytes the server would have run. Best-effort: on static hosting
+// there is nothing to fetch, and the bundle is then source-only.
+const runtime = {};
+Promise.all(
+  RUNTIME_FILES.map((n) =>
+    fetch(`/lib/occ/${n}`)
+      .then((r) => (r.ok ? r.text() : null))
+      .then((t) => { if (t) runtime[n] = t; })
+      .catch(() => {})
+  )
+).then(() => { if (plan) renderFileLinks(); });
 
 const PRESETS = {
   cart: {
@@ -300,9 +314,9 @@ function describeProfile(plan) {
 }
 
 function renderFileLinks() {
-  const files = generateKcl(plan);
+  const files = generateSource(plan, runtime);
   $('fileLinks').innerHTML = '';
-  for (const f of files.filter((f) => f.kind === 'kcl' || f.kind === 'doc')) {
+  for (const f of files.filter((f) => f.kind !== 'manifest')) {
     const a = document.createElement('a');
     a.textContent = f.name;
     a.href = URL.createObjectURL(new Blob([f.content], { type: 'text/plain' }));
@@ -311,19 +325,11 @@ function renderFileLinks() {
   }
 }
 
-// --- Zoo token (same scheme as zapim: .env on the server is preferred; a
-// token pasted here lives in localStorage only and rides each request in the
-// x-zoo-token header) ---------------------------------------------------------
-const TOKEN_KEY = 'wheelwright-zoo-token';
-const getStoredToken = () => localStorage.getItem(TOKEN_KEY) || '';
-const setStoredToken = (t) => (t ? localStorage.setItem(TOKEN_KEY, t.trim()) : localStorage.removeItem(TOKEN_KEY));
-const tokenHeaders = () => (getStoredToken() ? { 'x-zoo-token': getStoredToken() } : {});
-
 // --- downloads -------------------------------------------------------------
 async function postForBlob(url, msgOnFail) {
   const res = await fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...tokenHeaders() },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(gather()),
   });
   if (!res.ok) {
@@ -343,10 +349,10 @@ async function postForBlob(url, msgOnFail) {
   a.click();
 }
 
-$('dlKclZip').addEventListener('click', async () => {
+$('dlSourceZip').addEventListener('click', async () => {
   $('exportMsg').textContent = '';
   try {
-    await postForBlob('/api/kcl.zip', 'KCL zip failed');
+    await postForBlob('/api/source.zip', 'Source zip failed');
   } catch (e) {
     // Server not reachable (static hosting) — fall back to per-file links.
     $('exportMsg').textContent = 'Server zip unavailable — use the individual file links below.';
@@ -356,24 +362,24 @@ $('dlKclZip').addEventListener('click', async () => {
 $('dlStl').addEventListener('click', async () => {
   const btn = $('dlStl');
   btn.disabled = true;
-  btn.textContent = 'Exporting via Zoo…';
-  // A flat piece is seconds. A curved cross-section is lofted, and the engine
-  // spends minutes per piece fitting that surface — say so rather than let it
-  // look hung.
+  btn.textContent = 'Building…';
+  // A whole wheel is a few seconds; a lofted one is a few seconds more. Say
+  // roughly what is happening rather than leave the button silent.
   $('exportMsg').textContent =
     plan.sections.length > 1
-      ? `Lofting a ${plan.profile.shape} cross-section through ${plan.sections.length} profiles — expect a few minutes per piece.`
-      : '';
+      ? `Lofting a ${plan.profile.shape} cross-section through ${plan.sections.length} profiles, ` +
+        `${plan.uniquePieces.length} piece(s).`
+      : `Building ${plan.uniquePieces.length} piece(s).`;
   $('exportMsg').classList.remove('err');
   try {
-    await postForBlob('/api/export/stl', 'STL export failed');
-    $('exportMsg').textContent = 'STL bundle downloaded.';
+    await postForBlob('/api/export/stl', 'Build failed');
+    $('exportMsg').textContent = 'STL + STEP bundle downloaded.';
   } catch (e) {
     $('exportMsg').textContent = e.message;
     $('exportMsg').classList.add('err');
   } finally {
     btn.disabled = false;
-    btn.textContent = 'Export STL via Zoo';
+    btn.textContent = 'Build STL + STEP';
   }
 });
 
@@ -393,58 +399,45 @@ $('explode').addEventListener('input', (e) => preview?.setExplode(e.target.value
 $('fitView').addEventListener('change', (e) => preview?.setFitView(e.target.checked));
 
 function renderHealth(h) {
-  const el = $('zooStatus');
+  const el = $('occStatus');
   el.classList.remove('ok', 'off');
   let items;
   if (!h) {
     el.textContent = '○ static mode';
     el.classList.add('off');
-    items = [[false, 'server API unreachable']];
+    items = [[false, 'server API unreachable — the source bundle still downloads']];
   } else {
-    const z = h.zoo;
-    if (z.ready) {
-      el.textContent = '● Zoo export ready';
-      el.classList.add('ok');
-    } else {
-      el.textContent = z.cli ? '○ Zoo token needed' : '○ Zoo setup';
-      el.classList.add('off');
-    }
+    const o = h.occ;
+    el.textContent = o.ready ? '● build ready' : '○ kernel setup';
+    el.classList.add(o.ready ? 'ok' : 'off');
     items = [
-      [z.token, z.token ? `API token configured${getStoredToken() ? ' (from this browser)' : ''}` : 'API token missing'],
-      [z.cli, z.cli ? `zoo CLI found${z.cliVersion ? ` (${z.cliVersion})` : ''}` : 'zoo CLI not installed — run this in the project, then restart the server:'],
+      [
+        o.python,
+        o.python
+          ? `OpenCascade ${o.occtVersion} — ${o.pythonPath}`
+          : 'OpenCascade not installed — run this in the project, then restart the server:',
+      ],
     ];
   }
   $('healthList').innerHTML = items
     .map(([ok, text]) => `<li><span class="dot ${ok ? 'ok' : ''}"></span>${text}</li>`)
     .join('');
-  $('cliHint').classList.toggle('hidden', !h || h.zoo.cli);
+  $('cliHint').classList.toggle('hidden', !h || h.occ.ready);
 }
 
 function refreshHealth() {
-  fetch('/api/health', { headers: tokenHeaders() })
+  fetch('/api/health')
     .then((r) => r.json())
     .then(renderHealth)
     .catch(() => renderHealth(null));
 }
 
-$('zooStatus').addEventListener('click', (e) => {
+$('occStatus').addEventListener('click', (e) => {
   e.stopPropagation();
-  const panel = $('tokenPanel');
-  if (panel.classList.contains('hidden')) $('tokenInput').value = getStoredToken();
-  panel.classList.toggle('hidden');
+  $('kernelPanel').classList.toggle('hidden');
 });
 document.addEventListener('click', (e) => {
-  if (!e.target.closest('.token-wrap')) $('tokenPanel').classList.add('hidden');
-});
-$('tokenSave').addEventListener('click', () => {
-  setStoredToken($('tokenInput').value);
-  refreshHealth();
-  $('tokenPanel').classList.add('hidden');
-});
-$('tokenClear').addEventListener('click', () => {
-  setStoredToken('');
-  $('tokenInput').value = '';
-  refreshHealth();
+  if (!e.target.closest('.kernel-wrap')) $('kernelPanel').classList.add('hidden');
 });
 refreshHealth();
 

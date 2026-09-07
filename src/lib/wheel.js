@@ -558,10 +558,10 @@ export function planWheel(input = {}) {
   //             semicircle: a bicycle tire.
   // Everything on the tread rides this curve, bar floors included, so a
   // crowned wheel's bars fade out towards the shoulders the way a moulded
-  // tire's do. It has to be built into the piece's own profile rather than
-  // cut with a tool: Zoo's engine refuses any boolean whose operands carry
-  // curved faces ("cannot handle this 3D subtraction yet"), so a revolved or
-  // lofted cutter is not an option — see the loft in kclgen.js.
+  // tire's do. It is built into the piece's own profile and lofted rather
+  // than cut with a revolved tool. That was once forced — the hosted KCL
+  // engine refused any boolean whose operands carried curved faces — and is
+  // now a choice OpenCascade would let us revisit; see architecture.md §12.
   const crownWanted = p.profile.shape === 'round' ? halfW : p.profile.shape === 'crowned' ? (p.profile.crownDrop > 0 ? p.profile.crownDrop : clamp(W * 0.12, 1, halfW)) : 0;
   // The crown eats radius before the tread does, so it has to leave a rim
   // band and a web behind it.
@@ -614,9 +614,9 @@ export function planWheel(input = {}) {
   // features that can cross seam lines, so those segment wedges extend
   // inward past the bore boundary and the bore cutter erases the tips,
   // leaving the exact bore shape in the assembled hub. (Concentric bores
-  // used to be trimmed too, but shaving that razor-thin coaxial sliver is
-  // exactly the boolean Zoo's engine rejects — "cannot handle this 3D
-  // subtraction yet" — at bolt-pilot radii, so it is modeled away instead.)
+  // used to be trimmed too, but shaving a razor-thin coaxial sliver at
+  // bolt-pilot radii is a boolean worth not asking for — the old hosted
+  // engine rejected it outright — so it is modeled away instead.)
   const boreConcentric = b.type === 'bolt' || b.type === 'plain';
   const rInner = boreConcentric
     ? Math.max(0.8, boreMinR)

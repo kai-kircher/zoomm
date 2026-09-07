@@ -1,18 +1,18 @@
 #!/usr/bin/env node
-// Regenerates KCL for a spread of configurations and, when the Zoo CLI +
-// ZOO_API_TOKEN are available, round-trips every piece through the real
-// engine (`zoo kcl export`) to prove the generated code executes.
+// Regenerates the bundle for a spread of configurations and, when OpenCascade
+// is available, builds every unique piece through the real kernel to prove the
+// generated code executes and produces a valid solid.
 //
-// Usage: npm run validate:kcl        (writes to ./out/validate)
+// Usage: npm run validate        (writes to ./out/validate)
 
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadEnv } from '../src/lib/env.js';
 import { planWheel } from '../src/lib/wheel.js';
-import { generateKcl, slugFor } from '../src/lib/kclgen.js';
-import { zooStatus, exportStl } from '../src/lib/zoo.js';
+import { generateSource, slugFor, RUNTIME_FILES } from '../src/lib/occgen.js';
+import { occStatus, buildPieces } from '../src/lib/occ.js';
 
-loadEnv(process.cwd()); // seed ZOO_API_TOKEN from .env, like the server does
+loadEnv(process.cwd()); // seed WHEELWRIGHT_PYTHON from .env, like the server does
 
 const CONFIGS = [
   ['cart-14in-keyed', {}],
@@ -20,68 +20,87 @@ const CONFIGS = [
   ['rover-tpu-flexweb-hex', { diameter: 260, width: 60, material: 'tpu', infill: 'flexweb', tread: 'ribbed', bore: { type: 'hex', hexAcrossFlats: 13 } }],
   ['caster-bolt-honeycomb', { diameter: 160, width: 45, infill: 'honeycomb', tread: 'slick', bore: { type: 'bolt', boltCount: 4, boltCircle: 60, boltHoleDia: 5.5, pilotDia: 12 } }],
   // Honeycomb cells can be round (circle cutters) or filleted (lines + corner
-  // arcs) — both are shapes the engine sees nowhere else in the matrix.
+  // arcs) — both are shapes the kernel sees nowhere else in the matrix.
   ['honeycomb-round-cells', { diameter: 400, width: 70, infill: 'honeycomb', tread: 'slick', honeycomb: { cellSize: 18, wall: 3, cellShape: 'round' } }],
   ['honeycomb-filleted-cells', { diameter: 400, width: 70, infill: 'honeycomb', tread: 'ribbed', honeycomb: { cellSize: 18, cornerRadius: 2.5, orientation: 'tangential' } }],
   // The chart-drawn webs (lattice / auxetic / voronoi) all emit many-sided
-  // closed line loops with an explicit region seed — a shape the engine sees
-  // nowhere else, and one where a self-crossing loop or a seed that missed
-  // its own cell would only show up here.
+  // closed line loops, and are where a self-crossing loop would show up.
   ['lattice-woven-tpu', { diameter: 260, width: 55, material: 'tpu', infill: 'lattice', tread: 'ribbed', lattice: { rows: 3, cornerRadius: 2 } }],
   ['lattice-chevron-sharp', { diameter: 300, width: 50, infill: 'lattice', tread: 'lugged', lattice: { rows: 1, cornerRadius: 0 } }],
   ['auxetic-reentrant-hex', { diameter: 200, width: 40, material: 'tpu', infill: 'auxetic', tread: 'lugged', bore: { type: 'hex', hexAcrossFlats: 13 }, auxetic: { rings: 2, waist: 0.4 } }],
   ['voronoi-organic-bolt', { diameter: 180, width: 40, infill: 'voronoi', tread: 'slick', bore: { type: 'bolt', boltCount: 5, boltCircle: 70, boltHoleDia: 5.5, pilotDia: 14 }, voronoi: { seed: 7 } }],
   ['wagon-bolt-segmented', { diameter: 355.6, bore: { type: 'bolt', boltCount: 4, boltCircle: 60, boltHoleDia: 5.5, pilotDia: 12 } }],
   ['dbore-diamond-solid', { diameter: 200, width: 45, infill: 'solid', tread: 'diamond', bore: { type: 'dbore', diameter: 12 } }],
-  // Segmented bolt hub (N=8 at the default diameter): the pilot bore must be
-  // carried by the sector outline — the engine rejects the old tip-trim
-  // subtract of the concentric pilot circle over the wedge tip.
   ['cart-bolt-segmented', { bore: { type: 'bolt' }, infill: 'solid', tread: 'slick' }],
-  // Tread bars are notches in the piece profile, so a busy bar pattern is the
-  // case that used to blow up (engine hangups, "Batch edit result is not
-  // valid") and is now just a longer sketch. Chevron and angled bars move
-  // those notches from section to section, which is what the loft has to
-  // stitch; a one-piece wheel closes the ring across the 0°/360° seam.
+  // Tread bars are notches in the piece boundary, so a busy bar pattern is a
+  // long loop. Chevron and angled bars move those notches from section to
+  // section, which is what the loft has to stitch; a one-piece wheel closes
+  // the ring across the 0°/360° seam.
   ['chevron-segmented', { diameter: 300, width: 50, infill: 'solid', tread: 'chevron', treadAngle: 30 }],
   ['angled-one-piece', { diameter: 120, width: 30, infill: 'spokes', tread: 'angled', treadAngle: 30, bore: { type: 'plain', diameter: 8 } }],
   ['ribbed-segmented', { infill: 'solid', tread: 'ribbed' }],
-  // Curved cross-sections. These loft rather than extrude, which is minutes
-  // rather than seconds of engine time — and the only route to a crown, since
-  // no boolean will touch a solid with curved faces.
+  // Curved cross-sections: several sections lofted rather than one extruded.
   ['crowned-lugged', { diameter: 200, width: 40, infill: 'solid', tread: 'lugged', profile: { shape: 'crowned', crownDrop: 5 } }],
   ['round-bike-tire', { diameter: 200, width: 28, infill: 'honeycomb', tread: 'chevron', treadAngle: 35, treadDepth: 2.2, profile: { shape: 'round' }, bore: { type: 'bolt', boltCount: 5, boltCircle: 60, boltHoleDia: 5, pilotDia: 12 } }],
   ['crowned-ribbed', { diameter: 160, width: 36, infill: 'solid', tread: 'ribbed', profile: { shape: 'crowned' } }],
 ];
 
+const runtime = Object.fromEntries(
+  RUNTIME_FILES.map((n) => [n, readFileSync(join(process.cwd(), 'src', 'lib', 'occ', n), 'utf8')])
+);
 const outRoot = join(process.cwd(), 'out', 'validate');
-const status = zooStatus();
-console.log(`Zoo CLI: ${status.cli ? 'found' : 'NOT FOUND'} | token: ${status.token ? 'set' : 'NOT SET'}`);
+const status = occStatus();
+console.log(
+  status.ready
+    ? `OpenCascade: OCP ${status.occtVersion} via ${status.pythonPath}\n`
+    : 'OpenCascade: NOT FOUND — writing sources only. Run `npm run setup:occ` to build them too.\n'
+);
 
 let failures = 0;
+let pieces = 0;
+let seconds = 0;
+const started = Date.now();
+
 for (const [name, cfg] of CONFIGS) {
   const plan = planWheel(cfg);
-  const files = generateKcl(plan);
+  const files = generateSource(plan, runtime);
   const dir = join(outRoot, `${name}-${slugFor(plan)}`);
   mkdirSync(dir, { recursive: true });
   for (const f of files) writeFileSync(join(dir, f.name), f.content);
-  process.stdout.write(`${name}: N=${plan.N}, ${plan.uniquePieces.length} unique piece(s) → ${dir}\n`);
 
-  if (status.ready) {
-    try {
-      const stls = exportStl(files);
-      for (const s of stls) writeFileSync(join(dir, s.name), s.data);
-      console.log(`  ✓ engine round-trip OK (${stls.map((s) => `${s.name} ${(s.data.length / 1024).toFixed(0)}kB`).join(', ')})`);
-    } catch (e) {
+  const head = `${name.padEnd(26)} N=${String(plan.N).padStart(2)}, ${plan.uniquePieces.length} piece(s)`;
+  if (!status.ready) {
+    console.log(`${head} → ${dir}`);
+    continue;
+  }
+
+  try {
+    const built = buildPieces(files);
+    for (const b of built) writeFileSync(join(dir, b.name), b.data);
+    const rows = built.report.pieces;
+    const bad = rows.filter((p) => !p.valid);
+    pieces += rows.length;
+    seconds += rows.reduce((s, p) => s + p.seconds, 0);
+    const t = rows.reduce((s, p) => s + p.seconds, 0).toFixed(1);
+    if (bad.length) {
       failures++;
-      console.log(`  ✗ engine export FAILED: ${e.message}`);
+      console.log(`${head}  ✗ ${bad.length} piece(s) built an invalid B-rep`);
+    } else {
+      console.log(`${head}  ✓ ${t}s, ${built.length} files`);
     }
+  } catch (e) {
+    failures++;
+    console.log(`${head}  ✗ ${e.message.slice(0, 200)}`);
   }
 }
 
 if (!status.ready) {
-  console.log('\nKCL written. To validate against the engine: `npm run setup:zoo`, set ZOO_API_TOKEN in .env, and re-run.');
-} else if (failures) {
-  process.exit(1);
+  console.log('\nSources written. To build them: `npm run setup:occ`, then re-run.');
 } else {
-  console.log('\nAll configurations executed by the Zoo engine.');
+  console.log(
+    `\n${CONFIGS.length - failures}/${CONFIGS.length} configurations built ` +
+      `(${pieces} pieces, ${seconds.toFixed(1)}s of kernel time, ` +
+      `${((Date.now() - started) / 1000).toFixed(0)}s wall clock) → ${outRoot}`
+  );
+  if (failures) process.exit(1);
 }

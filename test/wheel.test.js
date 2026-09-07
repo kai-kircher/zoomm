@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { planWheel, normalizeParams, IN } from '../src/lib/wheel.js';
-import { generateKcl } from '../src/lib/kclgen.js';
+import { generateSource } from '../src/lib/occgen.js';
 
 test('unit conversion: inches convert to mm', () => {
   const { p } = normalizeParams({ units: 'in', diameter: 14, width: 2 });
@@ -683,8 +683,8 @@ test('sector wedges extend inside the bore so the cutter forms the true bore', (
 
 test('segmented concentric bores live in the outline, not in a cutter', () => {
   // Bolt pilots and plain bores are circles concentric with the wheel, so
-  // the sector outline carries the exact bore arc and no piece needs the
-  // razor-thin tip-trim subtract that the Zoo engine rejects.
+  // the sector outline carries the exact bore arc and no piece needs a
+  // razor-thin tip-trim subtract of a sliver at bolt-pilot radii.
   for (const cfg of [
     { bore: { type: 'bolt' }, infill: 'solid', tread: 'slick' }, // the failing repro: N=8, pilot r 6.2
     { diameter: 300, bore: { type: 'bolt', boltCount: 4, boltCircle: 60, boltHoleDia: 5.5, pilotDia: 12 } },
@@ -728,7 +728,7 @@ test('every tread × profile × web × hub combination yields closed, congruent 
                 if (Math.hypot(cur.a[0] - cur.b[0], cur.a[1] - cur.b[1]) < 1e-6) problems.push(`${where}: zero-length segment ${i}`);
               }
             }
-            generateKcl(plan); // must not throw for any of them
+            generateSource(plan); // must not throw for any of them
           }
         }
       }

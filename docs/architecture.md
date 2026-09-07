@@ -3,8 +3,9 @@
 Wheelwright turns a handful of numbers into printable CAD. This document is the
 engineering tour: the data model, the geometry, the CAD-generation rules, and
 why each of them is the way it is. The [user guide](user-guide.md) covers using
-the app; [zoo-api-notes.md](zoo-api-notes.md) covers what we learned about the
-Zoo platform underneath.
+the app. [zoo-api-notes.md](zoo-api-notes.md) is a historical record: it
+documents the hosted KCL engine this project used before the OpenCascade
+backend replaced it, and the limits that shaped the geometry model.
 
 ---
 
@@ -24,11 +25,11 @@ Zoo platform underneath.
         │
    ┌────┴─────────────────────────┐
    ▼                              ▼
-  preview.js                    kclgen.js
-  three.js (2D fallback)        KCL + ASSEMBLY.md + manifest
+  preview.js                    occgen.js
+  three.js (2D fallback)        piece-*.py + ASSEMBLY.md + manifest
                                        │
                                        ▼
-                                 Zoo engine → STL
+                                 OpenCascade → STL + STEP
 ```
 
 The single most important design decision: **there is exactly one geometry
@@ -48,9 +49,11 @@ tests, and hand to two renderers written in different styles.
 | File | Lines | Responsibility |
 | --- | ---: | --- |
 | `src/lib/wheel.js` | ~1810 | The planner. All geometry decisions live here. |
-| `src/lib/kclgen.js` | ~240 | Plan → KCL text, `ASSEMBLY.md`, JSON manifest. |
+| `src/lib/occgen.js` | ~330 | Plan → `piece-*.py`, `ASSEMBLY.md`, JSON manifest. |
+| `src/lib/occ/wheelwright_occ.py` | ~290 | Plan geometry → OpenCascade solid → STL/STEP. Ships in every bundle. |
+| `src/lib/occ/build.py` | ~110 | Builds every piece in a bundle. Ships in every bundle. |
 | `src/lib/units.js` | ~96 | mm ⇄ inch form rewriting; single source of "what is a length". |
-| `src/lib/zoo.js` | ~105 | Zoo CLI discovery, token resolution, `kcl export` invocation. |
+| `src/lib/occ.js` | ~140 | Finds a Python with OpenCascade; runs a bundle through it. |
 | `src/lib/zip.js` | ~87 | Dependency-free STORE-method ZIP writer. |
 | `src/lib/env.js` | ~39 | Dependency-free `.env` / `.env.local` loader. |
 | `server.js` | ~97 | Express: static UI, JSON API, export proxy. |
@@ -156,7 +159,7 @@ Two facts worth knowing:
 Deduplication is feature-aware. For each segment `k`, the planner computes which
 hub features intersect that segment's angular window — keyway, D-flat, bolt
 holes — and hashes them into a signature. Segments with equal signatures share
-one KCL file:
+one source file:
 
 ```
   N = 6, keyed bore  →  A(keyway) ×1 + B ×5      → two files
@@ -292,11 +295,14 @@ Two rules keep the loft buildable:
   own pitch cell. With an auto bar count the planner *spaces the bars out* to
   grant the angle asked for; pin `treadCount` and the angle gives way instead,
   with a note. `wheel.test.js` sweeps 2520 combinations asserting congruence.
-- **Circumferential grooves are the one tread feature that can still be a
-  boolean**, and only on a flat profile, where the solid is prismatic. On a
-  crowned one nothing may be subtracted at all (§12), so grooves are rolled
-  into the section radius as a parabolic dip — round-shouldered, and capped at
-  two because each costs three more profiles to loft through.
+- **Circumferential grooves are a boolean on a flat profile** — the solid is
+  prismatic there — and on a crowned one they are rolled into the section
+  radius instead, as a parabolic dip: round-shouldered, and capped at two
+  because each costs three more profiles to loft through. That split was
+  forced when the old engine refused every boolean against a curved face
+  (§12); OpenCascade would now cut either, and the rolled-in dip survives
+  because it is a better-looking groove, not because it is the only one
+  available.
 
 Flat grooves are emitted as a **sector wedge**, not a full ring: subtracting a
 360° ring from a 60° sector is a sliver boolean, and that is what used to hang
@@ -309,82 +315,107 @@ Two schemes, chosen by bore family:
 | Bore | Scheme | Why |
 | --- | --- | --- |
 | keyed, hex, D | Wedge **overshoots** inward past the bore; a bore-shaped cutter trims the tip | Their features cross seam lines, and the keyway tool's face is tangent to the wedge-tip arc — the trim has to stay. |
-| plain, bolt pilot | The sector outline **carries the bore arc directly**; no cutter at all | The bore boundary inside a wedge is just an arc, so the trim is unnecessary — and asking the engine to shave that razor-thin coaxial sliver is a boolean it rejects. See [WW-1](zoo-api-notes.md#ww-1--razor-thin-coaxial-subtractions-are-rejected). |
+| plain, bolt pilot | The sector outline **carries the bore arc directly**; no cutter at all | The bore boundary inside a wedge is just an arc, so the trim is unnecessary. It was also once mandatory: the old hosted engine rejected that razor-thin coaxial subtraction outright ([WW-1](zoo-api-notes.md#ww-1--razor-thin-coaxial-subtractions-are-rejected)). OpenCascade would take it; not asking is still the cheaper answer. |
 
 One-piece wheels keep the bore as a real through-hole in both cases: a full
 circle outline needs one.
 
-The upshot is visible in the output — `piece-A.kcl` of a segmented bolt wheel
-contains `piece = blank` and no boolean whatsoever.
+The upshot is visible in the output — `piece-A.py` of a segmented bolt wheel
+carries `CUTTERS = []` and builds from its boundary alone.
 
-## 12. Generating KCL
+## 12. Building the solids
 
-The emitter (`src/lib/kclgen.js`) is deliberately boring, and that is the
-strategy: *every* number is precomputed by the planner, so the generated file
-has nothing for the solver to solve and nothing ambiguous for the engine.
+The emitter (`src/lib/occgen.js`) is deliberately boring, and that is the
+strategy: *every* number is precomputed by the planner, so a generated
+`piece-*.py` is a declaration rather than a program — the piece's boundary at
+each height, and the list of prisms to take out of it.
 
-**Booleans are the scarce resource, not entities.** The engine gets slow and
-then unreliable as the tool list grows: the demo wheel's twelve cutters took
-~80 s, and busier wheels came back `Batch edit result is not valid`, hung
-mid-subtract, or dropped the modeling connection. So every cut that runs the
-full depth of the piece — bore, keyway, bolt holes, every web void, every
-tread bar — is emitted as **another loop in the same sketch**, and `region()`
-resolves the material face between them in one pass. Same wheel, same
-500-triangle solid, 3 s instead of 80 s. Only genuinely partial-depth cuts
-survive as tools.
+```python
+W = 50
 
-```kcl
-@settings(defaultLengthUnit = mm, kclVersion = 1.0)
+SECTIONS = [
+    {"z": 0, "kind": "sector", "segs": [
+        {"kind": "line", "a": [9.2, 0], "b": [16.346, 0]},          # dovetail pocket
+        {"kind": "arc", "a": [177.8, 0], "b": [177.664, 6.965],
+         "center": [0, 0], "ccw": True},                            # tread bar wall
+        …
+    ]},
+]
 
-sec1Sk = sketch(on = XY) {
-  e1 = line(start = [9.2, 0], end = [16.346, 0])          // dovetail pocket
-  …
-  e10 = arc(start = [177.8, 0], end = [177.664, 6.965], center = [0, 0])
-  e11 = line(start = [177.664, 6.965], end = [174.166, 6.828])   // bar wall
-  e12 = arc(start = [174.166, 6.828], end = [173.781, 13.437], center = [0, 0])
-  …
-  h1 = circle(start = [10.2, 0], center = [0, 0])         // bore — a loop
-  h2_1 = line(…)                                          // keyway
-  h3_1 = line(…)                                          // web void
-}
-sec1 = region(point = [147.099, 84.928], sketch = sec1Sk)
-hide(sec1Sk)
-blank = extrude(sec1, length = 50)
-piece = blank
+CUTTERS = [
+    # bore
+    {"shape": "circle", "c": [0, 0], "r": 10.2, "z0": 0, "z1": 50},
+    # web void
+    {"shape": "poly", "pts": [[62.1, 14.0], …], "z0": 0, "z1": 50},
+    # groove
+    {"shape": "annulus", "rIn": 171.3, "rOut": 177.8, "z0": 12, "z1": 18},
+]
 ```
 
-A curved cross-section is `loft`ed through one such sketch per z level instead
-of extruded:
+`wheelwright_occ.build()` then does the same two things for every wheel there
+is:
 
-```kcl
-blank = loft([sec1, sec2, sec3, sec4, sec5])
+```python
+blank = prism(SECTIONS[0], W)      # flat: one section
+      | loft(SECTIONS)             # crowned or round: several
+piece = blank - [prism(c) for c in CUTTERS]
 ```
 
-That is forced, not stylistic. The engine refuses any boolean whose operands
-carry curved faces — revolved *and* lofted tools alike, and `intersect` as well
-as `subtract` — so a crown can never be cut in; it has to be in the profile
-from the start. See [WW-12](zoo-api-notes.md#ww-12--booleans-reject-any-operand-with-curved-faces).
-Lofting costs minutes per
-piece against seconds for a flat wheel, which is why flat wheels keep the
-single-extrude fast path and the export timeout is 900 s.
+That uniformity is worth dwelling on, because it is not what a generator
+normally gets. Wheelwright's previous backend emitted KCL for a hosted engine,
+and on that engine **booleans were the scarce resource, not entities**: the demo
+wheel's twelve cutters took ~80 s, and busier wheels came back `Batch edit
+result is not valid`, hung mid-subtract, or dropped the modeling connection. So
+every full-depth cut — bore, keyway, bolt holes, web voids, tread bars — had to
+be folded back into the profile as another loop in the same sketch, resolved by
+a `region()` seed point, leaving only genuinely partial-depth cuts as tools.
+Crowns could not be cut at all, because that engine refused any boolean whose
+operands carried curved faces.
+
+OpenCascade has none of those limits. The busiest wheel in the matrix subtracts
+35 tools from a lofted solid in about a second, and the whole 19-configuration
+matrix builds in 36.6 s of kernel time. So the through/partial distinction stops
+being load-bearing: it survives only as `z0`/`z1`, which grooves genuinely need,
+and `region()` seed points are not needed at all.
+
+**One boolean, many tools.** The cutters go into a single `BRepAlgoAPI_Cut` with
+the whole tool list, rather than one cut per tool. OpenCascade fuses the tools
+once and cuts in a single pass, which is both faster and less prone to leaving a
+sliver where two cuts touch.
 
 House rules, each one earned:
 
 | Rule | Reason |
 | --- | --- |
-| Only `sketch`, `region`, `extrude`, `loft`, `offsetPlane`, `circle`, `line`, `arc`, `subtract`, `hide` | The most battle-tested operations in the engine. No fillets, no shells, no sweeps to go wrong. |
-| Full-depth cuts are sketch loops, never tools | Boolean count is what breaks the engine; entity count is not. |
-| Arcs emitted **start → end CCW** | KCL solver arcs always sweep counter-clockwise; the planner walks some loops clockwise, so those endpoints are swapped at emit time. |
-| Arc endpoints snapped onto a common radius | An arc is over-determined by start + end + center; a micron of disagreement is rejected, and reported as a bad region query point. See [WW-3](zoo-api-notes.md#ww-3--a-1-µm-arc-inconsistency-is-reported-as-a-bad-region-query-point). |
-| Region seeding: `region(segments = […])` for a lone closed curve, `region(point = …, sketch = …)` otherwise | The seed must be solid in *every* section, so it sits in the rim band — under the deepest tread valley and over the web. A seed that lands in a void resolves to the wrong face. |
-| Cutters overshoot the part in Z (`z0 = −1`, `z1 = W + 1`) | Faces exactly coplanar with the body are a known engine failure class. |
-| `subtract` batched at 12 tools per call | Long tool lists are a documented-by-experience failure. Rarely reached now — most wheels emit no boolean at all. |
-| Numbers rounded to 6 decimals | A thousandth of a micron: far below any printer, and far below the arc tolerance above. A rim carries fifty-odd tread arcs and a loop is only as closed as its worst entity. |
+| Only `MakeWire`, `MakeFace`, `MakePrism`, `ThruSections`, `Cut` and the two writers | The best-trodden paths in the kernel. No fillets, no shells, no sweeps to go wrong. |
+| Endpoints are **never** moved | Consecutive entities in a loop share their endpoint exactly, and the wire is chained through shared vertices to keep it that way. The tempting repair — projecting an arc's endpoints onto a mean radius, which the KCL emitter had to do — moves them off their neighbours; `MakeWire` then returns an unclosed wire and `MakeFace` answers with a degenerate sliver instead of an error. A Ø355.6 mm sector prism measured 7 901 mm³ that way, against 612 000. |
+| Arcs are built from three points | An arc is over-determined by start, end and centre, and the planner rounds all three to 1e-3 mm independently, so the endpoints disagree about their radius by ~1e-3. Fitting a circle through start, midpoint and end needs no agreement between them. |
+| Every wire is normalised counter-clockwise | The planner walks some loops clockwise. `MakeFace` forgives that; `ThruSections` does not, and an inverted section wire lofts an inside-out solid whose only symptom is a negative volume. |
+| Loft `ruled=True` | The planner spaces its sections so straight segments between them are the intended surface; a smoothed loft would bulge the tread between bar rows. |
+| Cutters overshoot the part in Z (`z0 = −1`, `z1 = W + 1`) | A tool face exactly coplanar with the body's is a classic way to make a boolean ambiguous. |
+| Numbers rounded to 6 decimals | A thousandth of a micron — far below any printer, and below the planner's own 1e-3 mm grid. It exists so a configuration regenerates byte-identically. |
 | Every file opens with a comment header | The file names the wheel, the piece and its print quantity, so it survives being separated from the bundle. |
 
-Alongside the `.kcl` files the generator emits `ASSEMBLY.md` (print settings,
-adhesive, glue-up order, export commands, warnings) and `wheelwright.json` (the
+**What ships is what runs.** The bundle carries `wheelwright_occ.py` and
+`build.py` verbatim — the same bytes `src/lib/occ/` holds and the server
+executes. `POST /api/export/stl` writes the bundle to a temp directory and runs
+`python build.py` on it, so there is no second, private build path that could
+drift from the one users get. `generateSource(plan, runtime)` takes those two
+files as an argument rather than reading them, which is what lets the same
+module run in Node and in the browser (where they are fetched from `/lib/occ`).
+
+Alongside the sources the generator emits `ASSEMBLY.md` (print settings,
+adhesive, glue-up order, build commands, warnings) and `wheelwright.json` (the
 full parameter set and piece list — the machine-readable half of the bundle).
+
+**Two constraints the planner still honours, now by choice.** The crown is
+lofted rather than cut, and circumferential grooves on a crowned profile are
+rolled into the section radius rather than subtracted (§10). Both existed
+because the old engine refused booleans against curved faces. OpenCascade would
+allow either to become a real cut, which would in turn retire the
+section-congruence requirement and the 2 520-combination test that guards it.
+The planner has not been reworked to take that up; it is the largest
+simplification still on the table.
 
 ## 13. The preview
 
@@ -426,30 +457,37 @@ code: minimum hub vertex radius equals the bore radius, no stray geometry.
 - `planWheel()` never calls `Math.random()`, `Date`, or any I/O. Given the same
   parameters it returns the same plan, in Node and in the browser.
 - The only randomness is `mulberry32(seed)` inside the voronoi web.
-- The KCL emitter rounds identically everywhere (`fmt()`), so re-running a
+- The emitter rounds identically everywhere (`fmt()`), so re-running a
   configuration produces byte-identical files. That is what makes
   "these five configs regenerate byte-identical" a usable regression test.
 
 ## 15. Testing strategy
 
-`npm test` runs 116 `node:test` cases with no dependencies and no network:
+`npm test` runs 134 `node:test` cases with no dependencies and no network:
 
 | Suite | What it pins |
 | --- | --- |
 | `wheel.test.js` (38) | Chunking math, joint clearance, dedupe, bolt/seam clearance, bore schemes, and the web patterns' guarantees — cell-to-cell wall, no overlap, no nesting, no self-crossing loops, band containment, seam clearance, measured on the finished millimetre geometry across 31 configurations. |
-| `kclgen.test.js` (7) | KCL well-formedness across a config matrix: balanced blocks, entity naming, arc winding, arc-endpoint radius agreement, batch sizes, that full-depth cuts are sketch loops rather than tools, and that a crowned piece lofts instead of extruding. |
+| `occgen.test.js` (35) | The emitted bundle across a 14-config matrix. The data blocks are read back and checked as geometry rather than as text: every loop closes to 1e-6 mm, every arc agrees with its own centre, cutters carry a sane depth range, a crowned piece emits congruent sections, and a configuration regenerates byte-identically. |
 | `preview.test.js` (10) | The rendered triangulation matches the plan (this is where phantom-cylinder-class bugs die), including that a crowned piece previews crowned, that every lofted mesh is watertight and outward-facing, and that it encloses the same volume the equivalent extrusion does — the check that catches an inverted void. |
 | `units.test.js` (6) | mm ⇄ in round-trips, which fields are lengths, and that the form table can't drift from `LENGTH_FIELDS`. |
-| `env.test.js` (4) | `.env` parsing and token resolution precedence. |
+| `env.test.js` (4) | `.env` parsing, and that the kernel status object keeps its shape whether or not OpenCascade is installed. |
 
-Above that, `npm run validate:kcl` regenerates a 19-configuration matrix and —
-when a Zoo CLI and token are present — round-trips **every piece through the
-real engine**. The matrix is chosen for shape diversity, not coverage optics: it
-includes the round-cell and filleted-cell honeycombs, all three chart webs, a
-segmented bolt hub, a D-bore, chevron and angled bars across a seam, and the
-two curved cross-sections, because those are the profile shapes the engine sees
-nowhere else. Live results, including a reproducible engine hang, are in
-[zoo-api-notes.md](zoo-api-notes.md#test-surface).
+Above that, `npm run validate` regenerates a 19-configuration matrix and — when
+OpenCascade is installed — builds **every piece through the real kernel**,
+failing the run if any piece comes back an invalid B-rep. The matrix is chosen
+for shape diversity, not coverage optics: it includes the round-cell and
+filleted-cell honeycombs, all three chart webs, a segmented bolt hub, a
+D-bore, chevron and angled bars across a seam, and the two curved
+cross-sections, because those are the profile shapes the kernel sees nowhere
+else.
+
+The whole matrix currently builds **19/19, 28 pieces, 36.6 s of kernel time**,
+every piece a valid B-rep. For contrast, the same matrix against the hosted
+KCL engine managed 14/19, with the five failures being timeouts and dropped
+connections rather than geometry errors, and single pieces costing 85–146 s
+([zoo-api-notes.md](zoo-api-notes.md#test-surface)). That gap is the reason
+for the backend change, and §12 is what it bought.
 
 ## 16. Performance
 
@@ -460,8 +498,10 @@ The planner runs on every keystroke, in the browser, on wheels up to 1.5 m:
   tens of thousands of candidates per pass.
 - Chart webs carry a per-segment void budget (120) and grow cells to meet it.
 - The UI debounces replanning by 120 ms.
-- Cell counts are bounded for the engine's sake as much as the browser's: every
-  void is a boolean tool downstream.
+- Cell counts are bounded for the browser's sake — the preview triangulates
+  every void. Downstream they are boolean tools, but 35 of them cost the
+  kernel about a second, so the budget is a rendering limit now rather than a
+  CAD one.
 
 ## 17. Adding a web style
 
@@ -474,7 +514,7 @@ The planner runs on every keystroke, in the browser, on wheels up to 1.5 m:
 3. Respect `faceMarginAng(r)` and the cell budget; push a note when you change
    what the user asked for.
 4. Emit cutters through `loopCutter()` so degenerate loops and bad region seeds
-   are dropped rather than emitted as KCL the engine can't resolve.
+   are dropped rather than emitted as a loop the kernel can't close.
 5. Add the style to the overlap/wall property tests, to `preview.test.js`, and
-   to `scripts/validate-kcl.js` if it produces a cutter shape the matrix doesn't
+   to `scripts/validate-occ.js` if it produces a cutter shape the matrix doesn't
    already cover.

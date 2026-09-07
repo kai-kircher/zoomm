@@ -74,6 +74,39 @@ export function occStatus() {
   };
 }
 
+// What the kernel can write, in the order an export names them. The `WRITERS`
+// table in wheelwright_occ.py is the other half of this; keep the two in step.
+export const EXPORT_FORMATS = ['stl', 'step'];
+
+/**
+ * Normalise a requested format list.
+ *
+ * Trims, lower-cases, drops duplicates, and orders by EXPORT_FORMATS so that
+ * `step,stl` and `stl,step` name the same export — which keeps the download
+ * filename stable however the caller spelled the request. Anything the kernel
+ * cannot write is rejected here rather than left to reach Python, where an
+ * unknown format used to be written out as a STEP under the wrong extension.
+ *
+ * @param {string|string[]|undefined} spec  e.g. 'stl', ['stl','step'], undefined
+ * @returns {string[]}  a non-empty subset of EXPORT_FORMATS
+ */
+export function parseFormats(spec, fallback = EXPORT_FORMATS) {
+  if (spec === undefined || spec === null || spec === '') return [...fallback];
+  const asked = (Array.isArray(spec) ? spec : String(spec).split(','))
+    .map((f) => String(f).trim().toLowerCase())
+    .filter(Boolean);
+  const bad = asked.filter((f) => !EXPORT_FORMATS.includes(f));
+  if (bad.length) {
+    throw new Error(
+      `Unknown export format: ${bad.join(', ')}. Known formats: ${EXPORT_FORMATS.join(', ')}.`
+    );
+  }
+  if (!asked.length) {
+    throw new Error(`No export format requested. Known formats: ${EXPORT_FORMATS.join(', ')}.`);
+  }
+  return EXPORT_FORMATS.filter((f) => asked.includes(f));
+}
+
 /**
  * Run a generated bundle through OpenCascade.
  *
@@ -83,10 +116,11 @@ export function occStatus() {
  * could drift from it.
  *
  * @param {{name: string, content: string}[]} files  from generateSource()
- * @param {{formats?: string[]}} opts
+ * @param {{formats?: string[]}} opts  which of EXPORT_FORMATS to write
  * @returns {{name: string, data: Buffer}[]}  the built STL/STEP files
  */
-export function buildPieces(files, { formats = ['stl', 'step'] } = {}) {
+export function buildPieces(files, { formats = EXPORT_FORMATS } = {}) {
+  const wanted = parseFormats(formats);
   const py = findPython();
   if (!py) {
     const err = new Error(
@@ -105,7 +139,7 @@ export function buildPieces(files, { formats = ['stl', 'step'] } = {}) {
 
     const r = spawnSync(
       py.path,
-      [...py.args, join(work, 'build.py'), work, '--formats', formats.join(','), '--json'],
+      [...py.args, join(work, 'build.py'), work, '--formats', wanted.join(','), '--json'],
       { encoding: 'utf8', timeout: BUILD_TIMEOUT_MS, windowsHide: true, maxBuffer: 32 * 1024 * 1024 }
     );
 
@@ -125,9 +159,9 @@ export function buildPieces(files, { formats = ['stl', 'step'] } = {}) {
       throw err;
     }
 
-    const wanted = new Set(formats.map((f) => `.${f}`));
+    const exts = new Set(wanted.map((f) => `.${f}`));
     const out = readdirSync(work)
-      .filter((n) => wanted.has(n.slice(n.lastIndexOf('.'))))
+      .filter((n) => exts.has(n.slice(n.lastIndexOf('.'))))
       .sort()
       .map((n) => ({ name: n, data: readFileSync(join(work, n)) }));
     if (!out.length) {

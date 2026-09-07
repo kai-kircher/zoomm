@@ -35,7 +35,8 @@ def main(argv=None):
     ap.add_argument("directory", nargs="?", default=".",
                     help="bundle directory (default: the current one)")
     ap.add_argument("--formats", default="stl,step",
-                    help="comma-separated: stl, step (default: both)")
+                    help="comma-separated: stl (slicing), step (CAD). "
+                         "Default: both.")
     ap.add_argument("--out", default=None,
                     help="where to write (default: alongside the sources)")
     ap.add_argument("--json", action="store_true",
@@ -44,13 +45,23 @@ def main(argv=None):
 
     src = os.path.abspath(args.directory)
     out = os.path.abspath(args.out) if args.out else src
-    formats = [f.strip() for f in args.formats.split(",") if f.strip()]
+    formats = [f.strip().lower() for f in args.formats.split(",") if f.strip()]
     os.makedirs(out, exist_ok=True)
 
     # The generated pieces do `from wheelwright_occ import ...`, and that file
     # ships in the bundle beside them.
     sys.path.insert(0, src)
     import wheelwright_occ  # noqa: E402  (needs the path above)
+
+    # Say so now rather than after minutes of geometry, and rather than let a
+    # typo reach `save`.
+    known = list(wheelwright_occ.WRITERS)
+    unknown = [f for f in formats if f not in known]
+    if unknown or not formats:
+        why = (f"Unknown format(s): {', '.join(unknown)}"
+               if unknown else "No format requested")
+        print(f"{why}. Known formats: {', '.join(known)}.", file=sys.stderr)
+        return 2
 
     pieces = sorted(glob.glob(os.path.join(src, "piece-*.py")))
     if not pieces:

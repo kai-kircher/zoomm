@@ -8,7 +8,7 @@ import { loadEnv } from './src/lib/env.js';
 import { planWheel } from './src/lib/wheel.js';
 import { generateSource, slugFor, RUNTIME_FILES } from './src/lib/occgen.js';
 import { zipStore } from './src/lib/zip.js';
-import { occStatus, buildPieces } from './src/lib/occ.js';
+import { occStatus, buildPieces, parseFormats } from './src/lib/occ.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 loadEnv(__dirname); // seed PORT / WHEELWRIGHT_PYTHON from .env / .env.local
@@ -66,15 +66,18 @@ app.post('/api/source.zip', handle((req, res) => {
 
 app.post('/api/export/stl', (req, res) => {
   let bundle;
+  let formats;
   try {
+    // `?formats=` picks what the kernel writes — `stl`, `step`, or both. Both
+    // is the default: STEP costs little on top of the solid that has already
+    // been built, and it is the format every other CAD tool opens, so an
+    // export that does not ask for anything in particular carries both.
+    formats = parseFormats(req.query.formats);
     bundle = bundleFor(req.body);
   } catch (e) {
     return res.status(400).json({ error: String(e.message || e) });
   }
   const { slug, files } = bundle;
-  // `step` is cheap here and is the format every other CAD tool can open, so
-  // the export carries both rather than making the user choose.
-  const formats = req.query.formats ? String(req.query.formats).split(',') : ['stl', 'step'];
   try {
     const built = buildPieces(files, { formats });
     const entries = [
@@ -85,7 +88,7 @@ app.post('/api/export/stl', (req, res) => {
     ];
     const zip = zipStore(entries);
     res.setHeader('Content-Type', 'application/zip');
-    res.setHeader('Content-Disposition', `attachment; filename="${slug}-stl.zip"`);
+    res.setHeader('Content-Disposition', `attachment; filename="${slug}-${formats.join('-')}.zip"`);
     res.send(zip);
   } catch (e) {
     res.status(e.code === 'no-python' ? 503 : 500).json({

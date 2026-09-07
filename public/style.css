@@ -207,6 +207,8 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 .note { border-left-color: var(--accent); background: #14202e; }
 
 .btn-row { display: flex; flex-direction: column; gap: 8px; }
+.fmt-row { display: flex; gap: 16px; margin-bottom: 10px; font-size: 13px; }
+.fmt-row .dim { font-size: 11.5px; }
 #fileLinks { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 6px; }
 #fileLinks a {
   font-size: 12px;

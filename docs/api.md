@@ -8,11 +8,11 @@ Base URL is wherever the server runs (`http://localhost:3000` by default).
 
 | Endpoint | Method | Returns |
 | --- | --- | --- |
-| [`/api/health`](#get-apihealth) | GET | Zoo CLI / token status |
+| [`/api/health`](#get-apihealth) | GET | Whether the geometry kernel is installed |
 | [`/api/plan`](#post-apiplan) | POST | The full geometry plan |
-| [`/api/kcl`](#post-apikcl) | POST | Generated files as JSON |
-| [`/api/kcl.zip`](#post-apikclzip) | POST | KCL bundle as a ZIP download |
-| [`/api/export/stl`](#post-apiexportstl) | POST | STL bundle via the Zoo engine |
+| [`/api/source`](#post-apisource) | POST | Generated files as JSON |
+| [`/api/source.zip`](#post-apisourcezip) | POST | Source bundle as a ZIP download |
+| [`/api/export/stl`](#post-apiexportstl) | POST | STL + STEP built by OpenCascade |
 
 Request bodies are the same **parameter object** everywhere (see
 [§ Parameters](#parameters)); every field is optional and falls back to
@@ -29,13 +29,19 @@ curl -s localhost:3000/api/health
 ```json
 {
   "ok": true,
-  "zoo": { "cli": true, "cliVersion": "zoo 0.2.186", "token": true, "ready": true }
+  "occ": {
+    "python": true,
+    "pythonPath": "/srv/wheelwright/bin/occ-venv/bin/python",
+    "occtVersion": "7.9.3.1",
+    "ready": true
+  }
 }
 ```
 
-`ready` is `cli && token` — the only condition under which `/api/export/stl`
-can work. Pass a browser-held token as a header to test it:
-`-H "x-zoo-token: …"`.
+`ready` means an interpreter with OpenCascade was found — the only condition
+under which `/api/export/stl` can work. There is no token and no account: the
+kernel runs locally. Resolution order is `WHEELWRIGHT_PYTHON`, then
+`./bin/occ-venv`, then `python3` / `python` / `py -3` on `PATH`.
 
 ## POST /api/plan
 
@@ -100,10 +106,10 @@ Geometry conventions:
 `warnings` are things the caller should act on; `notes` are decisions the
 planner made. Both are plain strings, already user-readable.
 
-## POST /api/kcl
+## POST /api/source
 
 ```sh
-curl -s localhost:3000/api/kcl -H 'content-type: application/json' -d '{}' \
+curl -s localhost:3000/api/source -H 'content-type: application/json' -d '{}' \
   | jq -r '.files[] | .name'
 ```
 
@@ -111,61 +117,74 @@ curl -s localhost:3000/api/kcl -H 'content-type: application/json' -d '{}' \
 {
   "slug": "wheel-d356-w50-keyed-6seg",
   "files": [
-    { "name": "piece-A.kcl",      "kind": "kcl",      "content": "…" },
-    { "name": "piece-B.kcl",      "kind": "kcl",      "content": "…" },
-    { "name": "ASSEMBLY.md",      "kind": "doc",      "content": "…" },
-    { "name": "wheelwright.json", "kind": "manifest", "content": "…" }
+    { "name": "piece-A.py",         "kind": "source",   "content": "…" },
+    { "name": "piece-B.py",         "kind": "source",   "content": "…" },
+    { "name": "wheelwright_occ.py", "kind": "runtime",  "content": "…" },
+    { "name": "build.py",           "kind": "runtime",  "content": "…" },
+    { "name": "ASSEMBLY.md",        "kind": "doc",      "content": "…" },
+    { "name": "wheelwright.json",   "kind": "manifest", "content": "…" }
   ]
 }
 ```
 
-One `.kcl` per **unique** piece — check `uniquePieces[].count` (or the manifest)
-for how many of each to print.
+One `piece-*.py` per **unique** piece — check `uniquePieces[].count` (or the
+manifest) for how many of each to print.
 
-## POST /api/kcl.zip
+The two `runtime` files are the geometry code itself, shipped verbatim so that
+a bundle builds itself:
+
+```sh
+pip install cadquery-ocp && python build.py .
+```
+
+That is the same code `/api/export/stl` runs, on the same files, so a bundle you
+build yourself cannot drift from what the server would have built for you.
+
+## POST /api/source.zip
 
 Same input; responds with `application/zip` and a
 `Content-Disposition: attachment` filename derived from the slug. Entries are
 nested under the slug directory.
 
 ```sh
-curl -s localhost:3000/api/kcl.zip -H 'content-type: application/json' \
+curl -s localhost:3000/api/source.zip -H 'content-type: application/json' \
   -d '{"diameter":200,"infill":"voronoi"}' -o wheel.zip
 ```
 
 ## POST /api/export/stl
 
-Generates the KCL, runs every piece through `zoo kcl export`, and returns a ZIP
-of the STLs plus the non-KCL files (assembly guide, manifest).
+Generates the bundle, builds every unique piece with OpenCascade, and returns a
+ZIP of the solids plus the assembly guide and manifest.
 
 ```sh
-curl -s localhost:3000/api/export/stl -H 'content-type: application/json' \
-  -H 'x-zoo-token: <token>' -d '{"diameter":120,"width":30}' -o wheel-stl.zip
+curl -s localhost:3000/api/export/stl -H 'content-type: application/json'   -d '{"diameter":120,"width":30}' -o wheel-stl.zip
 ```
+
+Both `.stl` (for slicing) and `.step` (for CAD) are built by default. Narrow it
+with `?formats=stl`.
 
 Errors are JSON with a machine-readable `code` and a human `how`:
 
 | Status | `code` | Meaning |
 | --- | --- | --- |
 | 400 | — | The parameters could not be planned. |
-| 503 | `no-cli` | The `zoo` binary was not found on the server. |
-| 503 | `no-token` | No token in `.env`, the environment, or the `x-zoo-token` header. |
-| 500 | `export-failed` | The engine rejected the KCL, produced no STL, or the CLI exited non-zero. The message carries up to 2 000 characters of CLI stderr. |
+| 503 | `no-python` | No interpreter with OpenCascade was found on the server. |
+| 500 | `build-failed` | The kernel could not build a piece. The message names the piece and carries the Python exception. |
 
 ```json
 {
-  "error": "The `zoo` CLI is not installed on this server.",
-  "code": "no-cli",
-  "how": "To enable one-click STL export, run `npm run setup:zoo` …"
+  "error": "No Python with the OpenCascade bindings was found on this server.",
+  "code": "no-python",
+  "how": "Run `npm run setup:occ` in the project …"
 }
 ```
 
-**Timing.** Export is synchronous and can be slow: we have measured 1.4 s for a
-plain bore, ~85 s for a 69-cutter honeycomb wheel, and a reproducible case that
-never returns at all (see
-[zoo-api-notes.md](zoo-api-notes.md#ww-2--export-time-is-wildly-unpredictable-and-sometimes-never-ends)).
-Give any client a generous timeout, and prefer `/api/kcl` plus your own export
-scheduling for batch work.
+**Timing.** The build is synchronous, local, and fast: across the 19-configuration
+matrix in `scripts/validate-occ.js`, pieces take roughly 0.1–2.5 s each, and a
+whole wheel — every unique piece, in both formats — lands in a few seconds.
+Lofted cross-sections are at the slow end of that range, not a different order
+of magnitude. A 60 s client timeout is generous; the server's own ceiling is
+ten minutes and exists only to bound a wedged process.
 
 ---
 
@@ -219,17 +238,22 @@ The planner is a dependency-free ES module and is the fastest path for scripting
 
 ```js
 import { planWheel } from './src/lib/wheel.js';
-import { generateKcl, slugFor } from './src/lib/kclgen.js';
+import { generateSource, slugFor } from './src/lib/occgen.js';
 
 const plan = planWheel({ diameter: 300, infill: 'auxetic', bore: { type: 'hex' } });
 console.log(plan.N, plan.uniquePieces.map((u) => `${u.label}×${u.count}`).join(' '));
-for (const f of generateKcl(plan)) writeFileSync(`${slugFor(plan)}-${f.name}`, f.content);
+for (const f of generateSource(plan)) writeFileSync(`${slugFor(plan)}-${f.name}`, f.content);
 ```
+
+`generateSource(plan, runtime)` takes the two runtime files as its second
+argument rather than reading them itself, so the same module works in Node and
+in the browser. Pass `{ 'wheelwright_occ.py': …, 'build.py': … }` read from
+`src/lib/occ/` to get a bundle that builds itself.
 
 The browser imports the very same file from `/lib/wheel.js`, which is why the
 preview and the generated CAD cannot disagree.
 
-`scripts/validate-kcl.js` is a worked example: it plans a matrix of
-configurations, writes each bundle, and — when a Zoo CLI and token are available
-— exports every piece through the engine and fails the run on the first
-rejection.
+`scripts/validate-occ.js` is a worked example: it plans a matrix of
+configurations, writes each bundle, and — when OpenCascade is available —
+builds every piece through the real kernel, failing the run if any piece comes
+back an invalid B-rep.

@@ -47,8 +47,8 @@ header p { margin: 2px 0 0; color: var(--dim); font-size: 12.5px; }
 .pill.off { color: var(--warn); border-color: #59512c; }
 button.pill { cursor: pointer; }
 
-.token-wrap { position: relative; }
-.token-panel {
+.kernel-wrap { position: relative; }
+.kernel-panel {
   position: absolute;
   right: 0;
   top: calc(100% + 8px);
@@ -60,13 +60,13 @@ button.pill { cursor: pointer; }
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55);
   padding: 14px;
 }
-.token-panel.hidden { display: none; }
-.token-panel h3 { margin: 0 0 8px; font-size: 13px; }
+.kernel-panel.hidden { display: none; }
+.kernel-panel h3 { margin: 0 0 8px; font-size: 13px; }
 .health-list { list-style: none; margin: 0 0 8px; padding: 0; font-size: 12.5px; }
 .health-list li { display: flex; align-items: center; gap: 8px; padding: 2px 0; color: var(--dim); }
 .health-list .dot { width: 7px; height: 7px; border-radius: 99px; background: var(--warn); flex: none; }
 .health-list .dot.ok { background: var(--good); }
-.token-panel .hint { margin: 8px 0; }
+.kernel-panel .hint { margin: 8px 0; }
 .cli-hint {
   font: 12px ui-monospace, monospace;
   color: var(--text);
@@ -78,25 +78,15 @@ button.pill { cursor: pointer; }
 }
 .cli-hint.hidden { display: none; }
 .cli-hint::before { content: '$ '; color: var(--dim); }
-.token-panel code { color: var(--text); background: var(--panel); padding: 0 4px; border-radius: 4px; }
-.token-panel input {
-  width: 100%;
-  background: var(--panel);
-  color: var(--text);
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  padding: 7px 9px;
-  font: 12px ui-monospace, monospace;
-}
-.token-panel input:focus { outline: 1px solid var(--accent); }
-.token-actions {
+.kernel-panel code { color: var(--text); background: var(--panel); padding: 0 4px; border-radius: 4px; }
+.kernel-actions {
   display: flex;
   justify-content: space-between;
   align-items: center;
   margin-top: 10px;
   font-size: 12px;
 }
-.token-actions button { padding: 5px 12px; font-size: 12.5px; margin-left: 6px; }
+.kernel-actions button { padding: 5px 12px; font-size: 12.5px; margin-left: 6px; }
 
 main {
   flex: 1;

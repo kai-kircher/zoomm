@@ -1,4 +1,4 @@
-// The preview must show the same solid the KCL engine produces. The planner
+// The preview must show the same solid the kernel produces. The planner
 // overshoots each segment wedge past the bore and lets the bore cutters trim
 // the tip (see wheel.js); the preview folds that trim into the piece profile.
 // Concentric bolt/plain bores are the exception: their bore arc is already
@@ -9,7 +9,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import * as THREE from 'three';
-import { planWheel } from '../src/lib/wheel.js';
+import { planWheel, tireSurfaceAt, tireLevels } from '../src/lib/wheel.js';
 import { tracePieceProfile, classifyCutters, shapeEmitter, buildPieceShape, buildLoftGeometry } from '../public/preview.js';
 
 // Records the traced profile as a point list (arcs sampled).
@@ -227,14 +227,21 @@ test('one-piece wheel keeps the bore as a real interior hole', () => {
   assert.equal(quads.size, 4, 'bore hole wall surrounds the origin');
 });
 
-// The CAD lofts a crowned piece through its sections; the preview has to do
-// the same or it would advertise a bicycle tire and draw a cylinder.
+// The CAD cuts the crown as an exact solid of revolution. The preview has to
+// draw the same curve or it would advertise a bicycle tire and render a
+// cylinder — and, more subtly, it has to draw it *accurately*: the lofted
+// crown this replaced sampled the section circle uniformly in height, which is
+// its coarsest exactly where it curves hardest, and came out 2.99 mm short at
+// the shoulder.
 test('a crowned piece previews as a crowned mesh, not a cylinder', () => {
   const plan = planWheel({ diameter: 200, width: 28, tread: 'slick', infill: 'solid', profile: { shape: 'round' }, bore: { type: 'plain', diameter: 12 } });
-  assert.ok(plan.sections.length > 2, 'round profile lofts through several sections');
+  assert.equal(plan.sections.length, 1, 'the crown is cut, not lofted');
   const geo = buildLoftGeometry(THREE, plan, plan.uniquePieces[0]);
-  assert.ok(geo, 'loft geometry built');
+  assert.ok(geo, 'shaped geometry built');
   const pos = geo.getAttribute('position');
+  const R = plan.radii.R;
+  const surf = tireSurfaceAt(plan);
+
   // Widest radius seen in a thin z slab, at mid-width and at the shoulder.
   const rMaxNear = (z0, z1) => {
     let m = 0;
@@ -244,9 +251,37 @@ test('a crowned piece previews as a crowned mesh, not a cylinder', () => {
     }
     return m;
   };
-  const R = plan.radii.R;
   assert.ok(Math.abs(rMaxNear(plan.W / 2 - 0.01, plan.W / 2 + 0.01) - R) < 0.5, 'full radius at mid-width');
   assert.ok(Math.abs(rMaxNear(-0.01, 0.01) - plan.profile.shoulderR) < 0.5, 'shoulder pulled in by the crown drop');
+
+  // No vertex may stand outside the true section circle, anywhere across the
+  // width. This is the check that would have caught the faceted loft: its
+  // chords fell *inside* the arc, so it fails the companion check below.
+  let out = 0;
+  for (let i = 0; i < pos.count; i++) {
+    out = Math.max(out, Math.hypot(pos.getX(i), pos.getY(i)) - surf(pos.getZ(i)));
+  }
+  // 1e-3 is the planner's coordinate grid; the mesh also arrives through a
+  // Float32 buffer, whose spacing at a 100 mm radius is already ~7.6e-6 mm.
+  assert.ok(out < 1e-3, `nothing bulges past the section circle (worst ${out.toExponential(2)} mm)`);
+
+  // And the surface is actually reached, so the wheel is not merely smaller
+  // than asked for. Checked at the heights the mesh has rings at — which are
+  // spaced by equal arc angle, so they bunch towards the shoulders and a
+  // fixed-width slab through the middle would simply find nothing.
+  const levels = tireLevels(plan);
+  assert.ok(levels.length > 8, 'the crown is sampled at more than a handful of heights');
+  let reached = 0;
+  for (const z of levels) {
+    const r = rMaxNear(z - 1e-3, z + 1e-3);
+    if (r === 0) continue; // Float32 z may miss the level exactly
+    assert.ok(
+      surf(z) - r < 1e-3,
+      `the ring at z=${z.toFixed(2)} reaches the arc (short by ${(surf(z) - r).toFixed(4)} mm)`
+    );
+    reached++;
+  }
+  assert.ok(reached > levels.length * 0.8, `most rings located (${reached}/${levels.length})`);
   assert.ok(geo.getIndex().count > 0 && Number.isFinite(pos.array[0]));
 });
 
@@ -300,7 +335,7 @@ test('a flat piece needs no loft and every section stays congruent', () => {
   assert.equal(flat.sections.length, 1);
   // Bars slanting across the width still loft, and must sample to equal rings.
   const angled = planWheel({ tread: 'angled', treadAngle: 30 });
-  assert.ok(angled.sections.length > 1);
+  assert.ok(angled.sections.length > 1, 'a slanted tread is the last thing that lofts');
   assert.ok(buildLoftGeometry(THREE, angled, angled.uniquePieces[0]), 'angled bars loft cleanly');
 });
 
@@ -324,11 +359,11 @@ function signedVolume(geo) {
 const extrudedVolume = (plan, u) =>
   signedVolume(new THREE.ExtrudeGeometry(buildPieceShape(THREE, plan, u), { depth: plan.W, bevelEnabled: false, curveSegments: 48 }));
 
-// Two ways into the loft, each with a plain extrusion of the same solid to
-// measure against: a crown of 0.05 mm is the flat wheel geometrically but
-// lofts, and slanting the bars only rotates each section about the axis, which
-// leaves the swept volume alone.
-test('every lofted piece encloses the solid its extrusion does — voids stay voids', () => {
+// Two ways into the shaped path, each with a plain extrusion of the same solid
+// to measure against: a crown of 0.05 mm is the flat wheel geometrically but
+// goes through the tire tool, and slanting the bars only rotates each section
+// about the axis, which leaves the swept volume alone.
+test('every shaped piece encloses the solid its extrusion does — voids stay voids', () => {
   const CASES = [
     ['crowned', (base) => [{ ...base, profile: { shape: 'flat' } }, { ...base, profile: { shape: 'crowned', crownDrop: 0.05 } }]],
     ['angled', (base) => [{ ...base, tread: 'angled', treadCount: 48, treadAngle: 0 }, { ...base, tread: 'angled', treadCount: 48, treadAngle: 30 }]],
@@ -342,10 +377,13 @@ test('every lofted piece encloses the solid its extrusion does — voids stay vo
         const lofted = planWheel(loftCfg);
         const what = `${infill}/${type} via ${via}`;
         assert.equal(flat.sections.length, 1, `${what}: reference extrudes`);
-        assert.ok(lofted.sections.length > 1, `${what}: subject lofts`);
+        const shaped =
+          lofted.sections.length > 1 ||
+          lofted.uniquePieces.some((u) => u.cutters.some((c) => c.shape === 'revolve'));
+        assert.ok(shaped, `${what}: subject is shaped rather than a plain prism`);
         for (let k = 0; k < flat.uniquePieces.length; k++) {
           const geo = buildLoftGeometry(THREE, lofted, lofted.uniquePieces[k]);
-          assert.ok(geo, `${what}: piece ${k} lofts`);
+          assert.ok(geo, `${what}: piece ${k} builds`);
           const want = extrudedVolume(flat, flat.uniquePieces[k]);
           const got = signedVolume(geo);
           assert.ok(want > 0, `${what}: piece ${k} extrudes to a positive volume`);

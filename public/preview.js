@@ -2,6 +2,8 @@
 // Primary renderer: three.js (CDN). If that import fails (offline demo),
 // falls back to a faithful 2D top-view on the same canvas.
 
+import { tireSurfaceAt, tireLevels } from '../src/lib/wheel.js';
+
 const TAU = Math.PI * 2;
 const d2r = (d) => (d * Math.PI) / 180;
 
@@ -10,19 +12,23 @@ const unwrapCCW = (a0, a1) => (a1 <= a0 ? a1 + TAU * Math.ceil((a0 - a1) / TAU +
 const unwrapCW = (a0, a1) => (a1 >= a0 ? a1 - TAU * Math.ceil((a1 - a0) / TAU + 1e-9) : a1);
 
 // Split cutters into the bore family (bore + keyway, hugging the piece
-// origin), face holes (full-depth, interior) and circumferential grooves,
-// which are the only cut left that does not run the full width. Tread bars
-// are not here at all — they are notches in the section outlines now.
+// origin), the tire (the one tool of revolution — the crown and its grooves)
+// and everything else, which is a full-depth interior hole. Tread bars are not
+// here at all; they are notches in the section outlines.
+//
+// The tire is deliberately *not* a hole: it is not a 2D loop in the piece's
+// plane at all, and the mesh gets it by shaping every ring to the running
+// surface instead. See buildLoftGeometry.
 export function classifyCutters(cutters) {
   const boreFamily = [];
   const holes = [];
-  const grooves = [];
+  let tire = null;
   for (const c of cutters) {
-    if (c.id.startsWith('groove')) grooves.push(c);
+    if (c.shape === 'revolve') tire = c;
     else if (c.id === 'bore' || c.id === 'keyway') boreFamily.push(c);
     else holes.push(c);
   }
-  return { boreFamily, holes, grooves };
+  return { boreFamily, holes, tire };
 }
 
 // Build path commands for a cutter (shared by three.js Path and Path2D).
@@ -79,11 +85,11 @@ function traceKeyedBore(bore, keyway, emit) {
 // True piece cross-section
 // ---------------------------------------------------------------------------
 // The planner's sector outline deliberately overshoots the bore: the wedge
-// tip reaches rInner (inside the bore) and the KCL bore/keyway cutters trim
+// tip reaches rInner (inside the bore) and the bore/keyway cutters trim
 // it back (see wheel.js). Handing those cutters to a triangulator as holes
 // breaks once a hole loop crosses the outline — ExtrudeGeometry grows side
 // walls along the whole loop, which shows up as a phantom thin-walled
-// cylinder at every piece tip. The real part (KCL subtract) has no such
+// cylinder at every piece tip. The real part (a boolean subtract) has no such
 // walls, so the preview must not either: every bore-family region is
 // star-shaped around the piece origin, so within the sector its true inner
 // boundary is the polar curve ρ(θ) = furthest bore boundary along the ray θ.
@@ -243,22 +249,43 @@ export function buildPieceShape(THREE, plan, unique, section = plan.outline) {
   return shape;
 }
 
-// --- crowned pieces --------------------------------------------------------
-// A crowned piece is lofted in the CAD (see kclgen.js), so the preview lofts
-// it too rather than pretending it is a cylinder. Every section is built from
-// the same segment structure by construction, so sampling each of them with a
-// fixed number of points per segment gives matching rings that stitch
-// straight into quad strips. Holes are identical at every height, so their
-// walls come out vertical exactly as the CAD builds them.
-const ARC_STEPS = 18;
+// --- shaped pieces ---------------------------------------------------------
+// Two things can make a piece more than a prism: a slanted tread, which moves
+// the profile from section to section, and the tire — the crown and its
+// grooves, which the CAD cuts as one exact solid of revolution.
+//
+// A triangle mesh cannot be exact, so this is where the two renderers part
+// company: the CAD carries the crown as a real arc and never samples it, while
+// the preview samples it at `tireLevels` heights and pulls every ring in to
+// `tireSurfaceAt`. Both call the same two functions in wheel.js, so the curve
+// itself cannot drift — only its resolution here.
+//
+// Shaping rings rather than rebuilding them is what keeps the topology fixed:
+// the ring length never changes, so the quad strips still stitch, and where
+// the crown falls past a bar's floor the window's own points simply collapse
+// onto the surface — which is the bar fading out, drawn for free.
+// Chords per arc, scaled by how far the arc actually sweeps rather than fixed
+// per entity. A flat 18 meant a one-piece wheel's whole rim — a single 360°
+// entity — came out as an 18-gon, 2.03 % short of its own area, while the
+// dozens of 2° arcs between tread bars each got the same 18 they had no use
+// for. ARC_FULL is the count a complete turn earns; ARC_MIN keeps a sliver
+// from degenerating.
+//
+// The count has to be identical from section to section or the rings stop
+// stitching, so it is derived from the sweep alone — and the only arcs whose
+// sweep moves with a slanted tread are the two at the sector ends, which stay
+// inside one bar pitch and so sit on ARC_MIN throughout.
+const ARC_FULL = 96;
+const ARC_MIN = 6;
 
 function polylineEmitter(out) {
   return {
     move: (x, y) => out.push([x, y]),
     line: (x, y) => out.push([x, y]),
     arc: (cx, cy, r, a0, a1) => {
-      for (let i = 1; i <= ARC_STEPS; i++) {
-        const a = a0 + (a1 - a0) * (i / ARC_STEPS);
+      const steps = Math.max(ARC_MIN, Math.ceil((Math.abs(a1 - a0) / TAU) * ARC_FULL));
+      for (let i = 1; i <= steps; i++) {
+        const a = a0 + (a1 - a0) * (i / steps);
         out.push([cx + r * Math.cos(a), cy + r * Math.sin(a)]);
       }
     },
@@ -289,14 +316,41 @@ const signedArea = (pts) => {
 // matching rings — the caller then falls back to a plain extrusion rather
 // than drawing something torn.
 export function buildLoftGeometry(THREE, plan, unique) {
-  const rings = [];
+  const secRings = [];
   let inner = null;
   for (const sec of plan.sections) {
     const parts = pieceLoops(plan, unique, sec);
     if (!inner) inner = parts.inner.map(sampleLoop);
-    rings.push(sampleLoop(parts.outer));
+    secRings.push(sampleLoop(parts.outer));
   }
-  if (rings.length < 2 || rings.some((r) => r.length !== rings[0].length || r.length < 3)) return null;
+  if (secRings.some((r) => r.length !== secRings[0].length || r.length < 3)) return null;
+
+  const secZ = plan.sections.map((s) => s.z);
+  const levels = tireLevels(plan);
+  const surf = tireSurfaceAt(plan);
+  if (levels.length < 2) return null;
+
+  // The CAD lofts between sections with ruled (straight) surfaces, so reading
+  // an intermediate profile off a straight line between two of them is not an
+  // approximation of the CAD — it is the same surface.
+  const ringAt = (z) => {
+    if (secRings.length === 1) return secRings[0];
+    let i = 0;
+    while (i < secZ.length - 2 && z > secZ[i + 1]) i++;
+    const span = secZ[i + 1] - secZ[i];
+    const t = span > 1e-9 ? (z - secZ[i]) / span : 0;
+    const a = secRings[i];
+    const b = secRings[i + 1];
+    return a.map(([x, y], k) => [x + (b[k][0] - x) * t, y + (b[k][1] - y) * t]);
+  };
+
+  const rings = levels.map((z) => {
+    const s = surf(z);
+    return ringAt(z).map(([x, y]) => {
+      const r = Math.hypot(x, y);
+      return r > s ? [(x * s) / r, (y * s) / r] : [x, y];
+    });
+  });
 
   const loops = [rings[0], ...inner]; // shapes/offsets are the same at every z
   const offsets = [];
@@ -305,10 +359,10 @@ export function buildLoftGeometry(THREE, plan, unique) {
     offsets.push(total);
     total += l.length;
   }
-  const K = plan.sections.length;
+  const K = levels.length;
   const pos = new Float32Array(total * K * 3);
   for (let i = 0; i < K; i++) {
-    const z = plan.sections[i].z;
+    const z = levels[i];
     const ring = [rings[i], ...inner];
     let v = i * total;
     for (const l of ring) {
@@ -347,15 +401,61 @@ export function buildLoftGeometry(THREE, plan, unique) {
   // Caps. Each end is triangulated from its own ring: an angled tread rotates
   // the notches from section to section, so one end's triangulation laid over
   // the other's points would fold triangles inside out along the bars.
+  // Where the crown has eaten a bar window away entirely, that window's two
+  // wall points land on the running surface together. They do not land in
+  // *exactly* the same place — the planner rounds coordinates to 1e-3 mm, so
+  // the two disagree about their shared angle by about that — which makes them
+  // a sliver rather than a duplicate, and a sliver is worse: the quad strips
+  // take it in their stride, but earcut quietly drops triangles around it and
+  // returns a torn cap.
+  //
+  // So the cap is triangulated from the ring with those pairs merged. The
+  // threshold is the planner's own grid, and the measurement backs it up: on a
+  // crowned lugged wheel the collapsed pairs sit 1e-6 to 1.7e-4 mm apart while
+  // every real neighbour is at least 4.5e-2 mm away — three orders of clear
+  // air either side.
+  const MERGE = 1e-3;
+  const distinct = (ring) => {
+    const keep = [];
+    for (let i = 0; i < ring.length; i++) {
+      const p = ring[i];
+      const q = ring[(i + 1) % ring.length];
+      if (Math.hypot(p[0] - q[0], p[1] - q[1]) > MERGE) keep.push(i);
+    }
+    return keep;
+  };
   const holeVecs = inner.map((l) => l.map(([x, y]) => new THREE.Vector2(x, y)));
   const ccw = signedArea(rings[0]) > 0;
   for (const end of [0, K - 1]) {
     const base = end * total;
-    const contour = rings[end].map(([x, y]) => new THREE.Vector2(x, y));
+    const ring = rings[end];
+    const keep = distinct(ring);
+    if (keep.length < 3) continue;
+    const contour = keep.map((i) => new THREE.Vector2(ring[i][0], ring[i][1]));
     const down = end === 0; // the z = 0 cap faces −Z, the far one +Z
-    for (const [a, b, c] of THREE.ShapeUtils.triangulateShape(contour, holeVecs)) {
+    // triangulateShape indexes contour and holes as one run, which is the same
+    // order `offsets` lays them out in — so a hole vertex only has to shift by
+    // however many contour points were dropped as repeats.
+    const shift = ring.length - keep.length;
+    const map = (i) => (i < keep.length ? keep[i] : i + shift);
+    const tri = (a, b, c) => {
       if (down === ccw) idx.push(base + a, base + c, base + b);
       else idx.push(base + a, base + b, base + c);
+    };
+    for (const [a, b, c] of THREE.ShapeUtils.triangulateShape(contour, holeVecs)) {
+      tri(map(a), map(b), map(c));
+    }
+    // The side strips still end on *every* ring vertex, repeats included, so
+    // the cap has to as well or those edges belong to one face and the shell
+    // reads as torn. Each dropped run is fanned back in: the triangles have no
+    // area — their points are coincident — but their vertices are distinct, so
+    // every edge comes out belonging to exactly two faces.
+    for (let k = 0; k < keep.length; k++) {
+      const from = keep[(k + keep.length - 1) % keep.length];
+      const to = keep[k];
+      for (let j = from; j !== (to + ring.length - 1) % ring.length; j = (j + 1) % ring.length) {
+        tri(j, (j + 1) % ring.length, to);
+      }
     }
   }
 
@@ -409,17 +509,19 @@ function create3D(canvas, { T: THREE, OrbitControls }) {
   let groups = [];
 
   function buildPieceGeometry(plan, unique) {
-    const { grooves } = classifyCutters(unique.cutters);
-    // Crowned pieces are lofted; flat ones extrude, which is cheaper and
-    // gives the arcs a finer tessellation.
+    // A piece is a plain prism unless something shapes it: a slanted tread
+    // that moves the profile, or a tire (crown and/or grooves) that the CAD
+    // cuts as a solid of revolution. Extruding is cheaper and tessellates the
+    // arcs more finely, so plain wheels keep it.
+    const shaped = plan.sections.length > 1 || classifyCutters(unique.cutters).tire;
     const geo =
-      (plan.sections.length > 1 ? buildLoftGeometry(THREE, plan, unique) : null) ||
+      (shaped ? buildLoftGeometry(THREE, plan, unique) : null) ||
       new THREE.ExtrudeGeometry(buildPieceShape(THREE, plan, unique), {
         depth: plan.W,
         bevelEnabled: false,
         curveSegments: 48,
       });
-    return { geo, grooves };
+    return { geo };
   }
 
   function rebuild() {
@@ -436,27 +538,18 @@ function create3D(canvas, { T: THREE, OrbitControls }) {
     const segRad = d2r(plan.segAngle);
     if (!state.fitView) {
       for (const piece of plan.pieces) {
-        const { geo, grooves } = geoByLabel.get(piece.label);
+        const { geo } = geoByLabel.get(piece.label);
         const mat = new THREE.MeshStandardMaterial({
           color: PIECE_COLORS[piece.k % PIECE_COLORS.length],
           roughness: 0.55,
           metalness: 0.15,
         });
         const g = new THREE.Group();
+        // Nothing is drawn on top any more: the crown and every groove are in
+        // the mesh itself, because the rings are shaped to the same running
+        // surface the CAD revolves. Grooves used to be a torus laid over the
+        // piece, since the profile they were cut from could not show them.
         g.add(new THREE.Mesh(geo, mat));
-        // Circumferential grooves are the only cut the mesh does not already
-        // carry (tread bars are notches in the profile now), so they stay an
-        // overlay — the KCL subtracts them for real.
-        const darkMat = new THREE.MeshStandardMaterial({ color: DARK, roughness: 0.9 });
-        for (const gr of grooves) {
-          const rIn = gr.rIn ?? plan.radii.R - plan.radii.treadEff;
-          const ring = new THREE.Mesh(
-            new THREE.TorusGeometry((rIn + plan.radii.R) / 2, (gr.z1 - gr.z0) / 2, 8, 64, plan.N === 1 ? TAU : segRad),
-            darkMat
-          );
-          ring.position.z = (gr.z0 + gr.z1) / 2;
-          g.add(ring);
-        }
         g.userData.k = piece.k;
         g.rotation.z = piece.k * segRad;
         root.add(g);
@@ -606,18 +699,21 @@ function create2D(canvas) {
       ctx.lineWidth = 1 / scale;
       ctx.stroke(outline);
 
-      const { boreFamily, holes, grooves } = classifyCutters(u.cutters);
+      const { boreFamily, holes } = classifyCutters(u.cutters);
       const hp = new Path2D();
       if (!boreConsumed && boreFamily.length) for (const tr of boreHoleTracers(boreFamily)) tr(pathEmitter(hp));
       for (const c of holes) traceCutter(c, pathEmitter(hp));
       ctx.fillStyle = '#0d1117';
       ctx.fill(hp, 'evenodd');
-      ctx.strokeStyle = '#10141d';
-      for (const gr of grooves) {
-        const rIn = gr.rIn ?? R - plan.radii.treadEff;
+      // This view looks straight down the axle, so every circumferential
+      // groove projects onto the same circle however many there are and
+      // wherever they sit across the width — one stroke says all of it. The
+      // 3D mesh carries them individually, and for real.
+      if ((plan.profile.grooves ?? []).length) {
+        ctx.strokeStyle = '#10141d';
         ctx.lineWidth = Math.max(1 / scale, 1.2);
         ctx.beginPath();
-        ctx.arc(0, 0, (rIn + R) / 2, 0, plan.N === 1 ? TAU : d2r(plan.segAngle));
+        ctx.arc(0, 0, R - plan.profile.grooveDepth / 2, 0, plan.N === 1 ? TAU : d2r(plan.segAngle));
         ctx.stroke();
       }
       ctx.restore();

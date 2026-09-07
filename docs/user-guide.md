@@ -23,33 +23,32 @@ Set `PORT` if 3000 is taken:
 PORT=4000 npm start
 ```
 
-### Optional: one-click STL export
+### Optional: one-click STL + STEP
 
-Wheelwright generates **KCL** — Zoo's CAD language. Turning KCL into an STL is
-the Zoo engine's job, and the engine is reached through the `zoo` CLI. Two
-things enable the in-app **Export STL via Zoo** button:
+Wheelwright builds its solids with [OpenCascade](https://dev.opencascade.org/),
+the geometry kernel behind FreeCAD. It runs on your machine — there is no
+account, no token and no network call. One command installs it:
 
 ```sh
-npm run setup:zoo       # downloads the Zoo CLI for your platform into ./bin
-cp .env.example .env    # then set ZOO_API_TOKEN
+npm run setup:occ       # venv in ./bin with `pip install cadquery-ocp`
 npm start
 ```
 
-Get a token at <https://zoo.dev/account/api-tokens> (the free tier is enough).
-Alternatively click the **Zoo status pill** in the top-right and paste a token
-there: it is kept in that browser's `localStorage`, rides each request in an
-`x-zoo-token` header, and is never stored or logged server-side.
+It needs a Python between 3.9 and 3.13 on your machine; the script finds one
+and tells you if it can't. If you already have `cadquery-ocp` somewhere, skip
+the setup and set `WHEELWRIGHT_PYTHON` to that interpreter instead.
 
-The pill tells you where you stand:
+The kernel pill in the top-right tells you where you stand:
 
 | Pill | Meaning |
 | --- | --- |
-| `Zoo ready` | CLI found *and* a token resolved — STL export works. |
-| `KCL only` | Something is missing; open the panel to see which. KCL download still works. |
-| `checking Zoo…` | `/api/health` hasn't answered yet. |
+| `build ready` | OpenCascade found — **Build STL + STEP** works. |
+| `kernel setup` | Not installed; open the panel for the command. The source bundle still downloads. |
+| `static mode` | `/api/health` didn't answer — you are on a static host, or the server is down. |
 
-**Nothing else depends on the token.** Configuring, previewing, planning and
-downloading the KCL bundle are entirely local.
+**Nothing else depends on it.** Configuring, previewing, planning and
+downloading the source bundle are entirely local either way — and the bundle
+carries the build code, so you can always run `python build.py .` in it.
 
 ---
 
@@ -78,11 +77,11 @@ downloading the KCL bundle are entirely local.
    slider to pull the segments apart and see the dovetails.
 4. **Check the fit.** Tick **Printer-fit view**: one piece is laid out
    print-oriented inside your usable build volume.
-5. **Take the geometry.** *Download KCL bundle (.zip)* gives you
-   `piece-A.kcl`, `piece-B.kcl`, `ASSEMBLY.md` and `wheelwright.json`.
-6. **Get STLs.** Either press *Export STL via Zoo* (needs CLI + token), or run
-   `zoo kcl export --output-format=stl piece-A.kcl .` yourself, or open the
-   `.kcl` files in [Zoo Design Studio](https://zoo.dev/design-studio) and
+5. **Take the geometry.** *Download source bundle (.zip)* gives you
+   `piece-A.py`, `piece-B.py`, the two build files, `ASSEMBLY.md` and
+   `wheelwright.json`.
+6. **Get the solids.** Either press *Build STL + STEP*, or run
+   `pip install cadquery-ocp && python build.py .` inside the bundle and
    export from there.
 
 ---
@@ -145,10 +144,11 @@ spaces the bars out to give you the angle you asked for — 45° on a 14″ whee
 gives 12 bars where a straight tread gives 54. Set a bar count yourself and the
 angle gives way instead, and the plan says what it settled on.
 
-**A curved profile costs export time.** `crowned` and `round` pieces are lofted
-through several profiles instead of extruded once, which the engine finds much
-harder: minutes per piece against seconds. The configurator warns you before you
-click Export.
+**A curved profile is cut, not approximated.** The crown is a real arc of the
+tire's section circle, taken out of the piece by one revolved tool, so a
+`round` section is a true semicircle at any width rather than a chain of flats
+between sampled heights. It costs a second or two more to build than a flat
+wheel, and nothing in accuracy.
 
 ### Hub / mating
 
@@ -274,13 +274,15 @@ The wheel's **width** is never split — it must fit printer Z.
 
 | File | Contents |
 | --- | --- |
-| `piece-A.kcl`, `piece-B.kcl`, … | One file per **unique** piece. Print-flat on XY, ready for `zoo kcl export` or Design Studio. |
-| `ASSEMBLY.md` | Print quantities and footprints, print settings, the glue-up sequence for your material, the export commands, and any warnings. |
+| `piece-A.py`, `piece-B.py`, … | One file per **unique** piece: its boundary and the prisms to subtract. Print-flat on XY. |
+| `wheelwright_occ.py`, `build.py` | The geometry code itself, shipped verbatim. `python build.py .` turns the pieces into STL and STEP. |
+| `ASSEMBLY.md` | Print quantities and footprints, print settings, the glue-up sequence for your material, the build commands, and any warnings. |
 | `wheelwright.json` | Machine-readable manifest: the full parameter set, segment count, piece list with quantities, footprint, warnings and notes. |
 
-Every KCL file opens with a comment header naming the wheel, the piece, and how
-many of it to print — the file is self-describing if it gets separated from the
-bundle.
+Every piece file opens with a comment header naming the wheel, the piece, and
+how many of it to print — the file is self-describing if it gets separated from
+the bundle. The `.step` files the build produces open in FreeCAD, Fusion,
+SolidWorks and Onshape as real solids, not meshes.
 
 ---
 
@@ -375,46 +377,52 @@ roadmap. Wheelwright says so rather than emitting parts that can't be printed.
 
 | Symptom | Cause | Fix |
 | --- | --- | --- |
-| **Export STL via Zoo** returns 503 `no-cli` | The `zoo` binary isn't on this server | `npm run setup:zoo`, restart. Or set `ZOO_CLI_PATH` in `.env`, or drop a binary at `./bin/zoo`. |
-| 503 `no-token` | No API token resolved | Set `ZOO_API_TOKEN` in `.env`, or paste a token in the Zoo panel. |
-| `zoo kcl export failed … cannot handle this 3D subtraction yet` | An engine boolean limitation | Report it — and see [zoo-api-notes.md](zoo-api-notes.md), which documents the one class we hit and how the generator avoids it. |
-| Export takes minutes, or never returns | Engine-side; we've measured 6 s and 300 s+ on comparable parts | See [WW-2](zoo-api-notes.md#ww-2--export-time-is-wildly-unpredictable-and-sometimes-never-ends). Retry; export the pieces individually with the CLI. |
+| **Build STL + STEP** returns 503 `no-python` | No interpreter with OpenCascade on this server | `npm run setup:occ`, restart. Or `pip install cadquery-ocp` yourself and set `WHEELWRIGHT_PYTHON` to that interpreter. |
+| `npm run setup:occ` says no suitable Python | Only a too-new (or too-old) Python is installed | `cadquery-ocp` ships wheels for 3.9–3.13. Install one from python.org and re-run, or set `PYTHON` to a suitable interpreter. |
+| `ImportError: DLL load failed … filename or extension is too long` (Windows) | OpenCascade's DLLs hit `MAX_PATH` under a deep checkout | Create the venv somewhere short (e.g. `C:\occ-venv`) and point `WHEELWRIGHT_PYTHON` at its `python.exe`. |
+| 500 `build-failed` naming a piece | The kernel could not build that piece's geometry | Download the source bundle and run `python build.py .` for the full traceback, then please report the configuration. |
 | Server starts but the browser shows `Planner error` | A parameter combination the planner rejects | The message names the field; check the browser console for the stack. |
 | `2D fallback` in the corner of the viewport | WebGL unavailable (remote desktop, blocked GPU) | Nothing breaks — the same plan renders in 2D. Use a local browser for 3D. |
 | Port 3000 in use | Another dev server | `PORT=4000 npm start`. |
 | Numbers look 25.4× wrong | Units selector changed without the form | Can't happen through the UI — but if you POST to the API directly, send `units: "in"` **with** inch values, or convert to mm yourself. |
-| A token was pasted in the browser and you want it gone | It lives in `localStorage` | Open the Zoo panel and press **Clear**. |
 
 ---
 
 ## 11. FAQ
 
-**Do I need a Zoo account to use this?**
-No. You need one only for one-click STL export from the app. KCL generation,
-preview, and the download bundle are local.
+**Do I need an account or an API key?**
+No. Nothing here talks to a service — the geometry kernel runs on your own
+machine, and the only thing the setup step downloads is a Python package.
 
 **Is the preview the real geometry?**
-Yes — the preview and the KCL come from the same plan object, and the preview
-renders the piece's true carved profile (not an approximation of it), including
-the tread bars and the crown — a crowned wheel is lofted in the preview exactly
-as it is in the CAD. The one deliberate simplification left is circumferential
-grooves, which are drawn as an overlay; the KCL subtracts them for real.
+Yes — the preview and the build script come from the same plan object, and the
+preview renders the piece's true carved profile: the tread bars, the crown and
+the circumferential grooves are all in the mesh, none of them drawn on top of
+it. Where the two must differ is resolution: a triangle mesh cannot hold an
+exact arc, so the preview samples the tire's curve while the solid carries it
+whole. Both read that curve from the same function.
+
+On a wheel with a *slanted* tread the preview reads 1–3 % light, because it
+also samples each profile as a polyline and rules between them where the kernel
+lofts the exact outlines. Everywhere else it now agrees with the built solid to
+better than 0.1 %. Weigh the STL, not the preview.
 
 **Will the pieces really slide together?**
 The dovetail pockets are the tenon geometry plus your clearance per side, and
 the tests assert exactly that. What no generator can know is your printer's
 elephant-foot and shrinkage — hence the 100 mm test preset.
 
-**Can I edit the generated KCL?**
-That's the point of shipping source instead of a mesh. The files are plain KCL
-with named entities and a comment header; open them in Design Studio, change a
-number, re-export.
+**Can I edit the generated files?**
+That's the point of shipping source instead of a mesh. A `piece-*.py` is plain
+data with a comment header — change a coordinate, re-run `python build.py .`.
+For CAD-side edits, build the STEP and take it into FreeCAD or anything else.
 
 **Is the voronoi web random?**
 It's seeded. The planner never calls `Math.random()`, so the same parameters
 give the same wheel in the browser and on the server. Change `seed` to reroll.
 
 **Can I run this in CI / headless?**
-Yes: `POST /api/kcl` returns the files as JSON, `npm run validate:kcl`
-regenerates a whole config matrix, and with a token it round-trips every piece
-through the engine. See [api.md](api.md).
+Yes: `POST /api/source` returns the files as JSON, and `npm run validate`
+regenerates a whole config matrix and builds every piece through the real
+kernel, failing on the first invalid solid. No network needed. See
+[api.md](api.md).

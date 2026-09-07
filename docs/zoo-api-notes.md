@@ -1,10 +1,28 @@
 # Zoo platform field notes — bugs, friction, and suggestions
 
+> **Historical record.** Wheelwright was built for the Zoo API makeathon and
+> generated KCL, which Zoo's hosted engine turned into STLs. It now builds its
+> solids locally with [OpenCascade](https://dev.opencascade.org/) instead, so
+> the workarounds described below are no longer in the code — the KCL emitter
+> and the CLI wrapper have been deleted.
+>
+> This document is kept because the findings are still true of the platform as
+> we measured it, and because they are the reason the geometry model looks the
+> way it does. [architecture.md](architecture.md) §12 describes what replaced
+> them and what each constraint cost. The one-line summary: the same
+> 19-configuration matrix that managed **14/19 here, with pieces costing 85–146
+> seconds and five failures that were all timeouts or dropped connections**,
+> builds **19/19 in 36.6 seconds of kernel time** on OpenCascade, every piece a
+> valid B-rep.
+>
+> Where the text below says "we ship X as a workaround", read it in the past
+> tense.
+
 Everything we learned about Zoo's APIs while building Wheelwright, written so a
 Zoo engineer can act on each item. Every finding here is first-hand: a repro we
-ran, a measurement we took, or a workaround that is in this repository and can
-be deleted the day the underlying issue is fixed — which is the correct fate of
-a workaround.
+ran, a measurement we took, or a workaround that was in this repository and
+could be deleted the day the underlying issue is fixed — which is the correct
+fate of a workaround.
 
 Wheelwright is an unusual load for the engine. It doesn't hand-write one model;
 it *generates* CAD from a solver, so a bad afternoon produces a hundred variants
@@ -507,11 +525,20 @@ Credit where it's due; these are why the project is built on Zoo at all.
 
 ## Reproducing all of this
 
+**These commands no longer exist in this repository.** `npm run validate:kcl`,
+`npm run setup:zoo`, `src/lib/kclgen.js` and `src/lib/zoo.js` were removed when
+the backend moved to OpenCascade; the nearest equivalent today is `npm run
+validate`, which builds the same 19-configuration matrix locally and never
+touches the network. To reproduce a finding below against the Zoo engine, check
+out the last commit before the migration:
+
 ```sh
-npm run validate:kcl          # 19 configs; with a token, every piece round-trips through the engine
+git log --oneline -1 --before=<the migration commit> -- src/lib/kclgen.js
+git checkout <that commit> -- src/lib/kclgen.js src/lib/zoo.js scripts/
+npm run setup:zoo && npm run validate:kcl   # 19 configs, needs ZOO_API_TOKEN
 ```
 
-The KCL for every configuration lands in `out/validate/…` and is byte-stable
+The KCL for every configuration landed in `out/validate/…` and was byte-stable
 across runs, so any file mentioned above can be regenerated and re-sent. Each
 finding's repro is either that matrix, or the minimal file quoted inline.
 

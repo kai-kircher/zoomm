@@ -8,8 +8,9 @@ https://github.com/user-attachments/assets/682232c1-782d-4b58-965c-8e1834f986e8
 
 **Any wheel, any printer.** A parametric configurator for 3D-printable wheels that automatically
 splits the wheel into segments that fit *your* printer's build volume and slide together with
-dovetail joints — no CAD required. Built for the [Zoo](https://zoo.dev) API makeathon: every
-configuration compiles to ready-to-run **KCL**, and Zoo's engine turns it into STLs.
+dovetail joints — no CAD required. Every configuration compiles to a small, readable Python
+build script, and [OpenCascade](https://dev.opencascade.org/) turns it into STL and STEP —
+locally, in seconds, with no account, token or network.
 
 Want a 14″ airless tire for your cart project but only own an Ender-sized printer? Type in the
 wheel you want and the envelope you have; Wheelwright hands you the pieces, the print settings,
@@ -24,8 +25,8 @@ and the glue-up instructions.
 - **Pick a tread**: lugged (straight bars), angled, chevron / V-bar, ribbed, diamond, or slick —
   with bar count, bar angle, rib count and depth all settable.
 - **Pick a cross-section**: flat cylindrical, crowned by a settable drop, or a full round
-  bicycle-tire section. The tread rides the curve, so bars fade out towards the shoulders the way
-  a moulded tire's do.
+  bicycle-tire section — cut as an exact arc of the section circle, not approximated. The tread
+  rides the curve, so bars fade out towards the shoulders the way a moulded tire's do.
 - **Pick a web**: solid, spokes, or one of the four [airless patterns](#the-airless-webs) —
   honeycomb, interlaced lattice, auxetic re-entrant, or voronoi. Each carries its own parameter
   group (cell size, wall, orientation, corner rounding…) and each guarantees a minimum wall
@@ -34,12 +35,12 @@ and the glue-up instructions.
 - **It plans the build**: picks the smallest segment count whose pieces fit the bed, sizes
   slide-together dovetails into the rim and hub rings, keeps structural webs clear of the seams,
   and dedupes pieces — a keyed 6-segment wheel is "print A×1, B×5", not six different files.
-- **It generates KCL**: one file per unique piece, in Zoo's modern solver-sketch dialect, lying
+- **It generates a build script**: one file per unique piece — the piece boundary and the
+  prisms to subtract from it, as plain data — lying
   print-flat on XY. Plus a generated `ASSEMBLY.md` (print settings, adhesive choice, glue-up
   steps) and a JSON manifest.
-- **Zoo makes the STLs**: one click on a server with the [Zoo CLI](https://zoo.dev/docs/developer-tools/cli)
-  + `ZOO_API_TOKEN`, or open the `.kcl` files in [Zoo Design Studio](https://zoo.dev/design-studio)
-  and export there.
+- **OpenCascade makes the solids**: one click for STL *and* STEP, or run `python build.py .`
+  in the bundle you downloaded — it ships with the same geometry code the app runs.
 
 | Airless TPU rover wheel (flex-web, hex bore) | Printer-fit check against your envelope |
 |---|---|
@@ -55,24 +56,23 @@ npm start          # http://localhost:3000
 Optional, for one-click STL export from the UI — two steps:
 
 ```sh
-npm run setup:zoo       # downloads the Zoo CLI for your platform into ./bin
-cp .env.example .env    # then set ZOO_API_TOKEN (https://zoo.dev/account/api-tokens)
+npm run setup:occ       # venv in ./bin with OpenCascade (pip install cadquery-ocp)
 npm start
 ```
 
-…or click the **Zoo status pill** (top right in the app) and paste a token there. A pasted
-token lives in that browser's localStorage only and rides each request in an `x-zoo-token`
-header — the server uses it per-request and never stores or logs it. `.env` / `.env.local`
-are loaded by a tiny dependency-free loader (real environment variables always win), and the
-CLI is found via `PATH`, `ZOO_CLI_PATH`, or a `./bin/zoo` drop-in.
+Already have `cadquery-ocp` in some interpreter? Skip the setup step and point
+`WHEELWRIGHT_PYTHON` at it. Otherwise the server looks for `./bin/occ-venv`, then
+`python3` / `python` / `py -3` on `PATH`. The **kernel pill** (top right in the app) says
+which interpreter it found. `.env` / `.env.local` are loaded by a tiny dependency-free
+loader; real environment variables always win.
 
-Without the CLI/token the app still does everything except server-side STL conversion — you
-download the KCL bundle and run `zoo kcl export --output-format=stl piece-A.kcl .` yourself, or
-export from Design Studio.
+Without OpenCascade installed the app still does everything except build the solids itself —
+you download the source bundle and run `pip install cadquery-ocp && python build.py .` in it,
+which is the same code, on the same files, that the server would have run.
 
 ```sh
-npm test           # 116 unit tests: chunking math, joints, dedupe, piece profiles, every web pattern's wall and overlap guarantees, KCL well-formedness
-npm run validate:kcl   # regenerates a 19-config matrix; round-trips through Zoo's engine when a token is set
+npm test           # 134 unit tests: chunking math, joints, dedupe, piece profiles, every web pattern's wall and overlap guarantees, emitted-bundle geometry
+npm run validate   # regenerates a 19-config matrix and builds every piece through the real kernel
 ```
 
 ## Documentation
@@ -80,9 +80,9 @@ npm run validate:kcl   # regenerates a 19-config matrix; round-trips through Zoo
 | Doc | What's in it |
 |---|---|
 | [User guide](docs/user-guide.md) | Install, every control, reading the build plan, six worked use-cases, printing and glue-up, troubleshooting. |
-| [Architecture](docs/architecture.md) | The planner's geometry: band model, segment solver, dedupe, the chart the curved webs are drawn in, KCL emission rules, testing strategy. |
-| [HTTP API](docs/api.md) | `/api/plan`, `/api/kcl`, `/api/kcl.zip`, `/api/export/stl`, the parameter object, error codes. |
-| [Zoo platform field notes](docs/zoo-api-notes.md) | Bug reports, friction and suggestions for Zoo's APIs — with minimal repros, measured timings, and the workaround shipped for each. |
+| [Architecture](docs/architecture.md) | The planner's geometry: band model, segment solver, dedupe, the chart the curved webs are drawn in, how the solids get built, testing strategy. |
+| [HTTP API](docs/api.md) | `/api/plan`, `/api/source`, `/api/source.zip`, `/api/export/stl`, the parameter object, error codes. |
+| [Zoo platform field notes](docs/zoo-api-notes.md) | Historical: the hosted KCL engine this project ran on before OpenCascade, its failure modes, and the geometry rules they forced. |
 
 ## How it works
 
@@ -102,16 +102,16 @@ npm run validate:kcl   # regenerates a 19-config matrix; round-trips through Zoo
                       │
         ┌─────────────┴──────────────┐
         ▼                            ▼
-  Three.js preview            KCL generator (src/lib/kclgen.js)
-  (same plan, exploded        one .kcl per unique piece +
-  view + printer-fit view)    ASSEMBLY.md + manifest
+  Three.js preview            Bundle generator (src/lib/occgen.js)
+  (same plan, exploded        one piece-*.py per unique piece +
+  view + printer-fit view)    the build runtime + ASSEMBLY.md + manifest
                                      │
                                      ▼
-                          Zoo engine (zoo kcl export / Design Studio) ──► STLs
+                          OpenCascade (python build.py .) ──► STL + STEP
 ```
 
 One geometry plan feeds both the preview and the code generator, so what you see is what the
-engine builds. Everything is derived on configure — there is no model library.
+kernel builds. Everything is derived on configure — there is no model library.
 
 ### The segmentation scheme
 
@@ -120,8 +120,8 @@ Segments are annular wedges cut by radial seams. Each seam carries **axial slide
 hub ring, so all pieces slide together along the axle direction and any piece can be inserted
 last. Dovetails resist the circumferential separation; axial retention comes from the adhesive
 (plus hub bolts, when you pick a bolt-circle hub). Because the tenon/pocket geometry is part of
-each piece's 2D outline, the generated KCL needs nothing beyond sketches, regions, extrudes and
-subtracts — the most battle-tested ops in the engine.
+each piece's 2D outline, the build needs nothing beyond wires, faces, one prism or loft, and
+one subtract — the most battle-tested operations in the kernel.
 
 For keyed, hex and D hubs the wedges extend inward past the bore line and the bore tool is
 subtracted per piece, so the assembled hub carries the exact mating feature with your chosen fit
@@ -198,7 +198,7 @@ clearance, and the wall actually left between them.
 | `orientation` | `radial` | `radial` points a cell vertex at the rim; `tangential` turns the whole lattice 30° so a flat faces it. |
 | `cellShape` | `hex` | `round` replaces each hex with its inscribed circle — same lattice, same walls, no stress-raising corners. |
 | `cornerRadius` | `0` (sharp) | Fillets the hex corners. Capped at half the across-flats width, where the cell becomes `round`. |
-| `maxCells` | `64` | Per-segment cell budget. Cells are grown until they fit it, keeping the KCL sane. |
+| `maxCells` | `64` | Per-segment cell budget. Cells are grown until they fit it, keeping the preview responsive. |
 
 ### Interlaced lattice
 
@@ -268,7 +268,7 @@ engine no more than a slick one.
 | `treadDepth` | `3.5` mm | How deep the bars and grooves cut, measured from the tread surface. |
 | `treadCount` | `0` (auto) | Bars around the whole wheel, snapped to a multiple of the segment count. Auto works out to roughly one bar every 20 mm of circumference. |
 | `treadAngle` | `25`° | Bar slant off the wheel's axis (`angled`, `chevron`). See below. |
-| `ribCount` | `0` (auto) | Circumferential grooves across the width. Auto is one per 14 mm. |
+| `ribCount` | `0` (auto) | Circumferential grooves across the width, up to 6. Auto is one per 14 mm. A crowned tread takes as many as a flat one — they ride the same revolved tool. |
 
 A bar can only lean as far as its own pitch cell allows before neighbouring bars merge. When
 `treadCount` is on auto the planner honours the angle you asked for and **spaces the bars out**
@@ -303,64 +303,85 @@ The app recommends per material, and bakes it into the generated `ASSEMBLY.md`:
 Thin bead in each dovetail pocket and along both faces, slide, wipe, cure 24 h. Dry-fit first —
 the default 0.15 mm/side joint clearance suits most printers and is tunable.
 
-## The generated KCL
+## The generated build script
 
-Modern solver-sketch dialect, pinned to `kclVersion = 1.0` (the same pin Zoo's shipping samples
-use), with exact precomputed coordinates — nothing for the solver to solve, nothing ambiguous
-for the engine:
+One file per unique piece, and it is a declaration rather than a program: the piece's boundary at
+each height, and the prisms to take out of it. Every number is precomputed by the planner, so
+there is nothing to solve and nothing ambiguous to resolve.
 
-```kcl
-@settings(defaultLengthUnit = mm, kclVersion = 1.0)
+```python
+# Wheelwright — 3D-printable segmented wheel
+# Wheel: Ø355.6 × 50 mm, honeycomb web, lugged tread, 4-bolt Ø5.5 on Ø60 BCD
+# Piece A: print 4 of 8 segments (45° each, slide-together dovetails, 0.15 mm clearance/side)
 
-sec1Sk = sketch(on = XY) {
-  e1 = line(start = [9.2, 0], end = [16.346, 0])     // dovetail pocket, face 0
-  ...
-  e10 = arc(start = [177.8, 0], end = [177.664, 6.965], center = [0, 0])   // tread
-  e11 = line(start = [177.664, 6.965], end = [174.166, 6.828])             // bar wall
-  e12 = arc(start = [174.166, 6.828], end = [173.781, 13.437], center = [0, 0])
-  ...
-  h1 = circle(start = [10.2, 0], center = [0, 0])    // bore — a loop, not a tool
-  h2_1 = line(...)                                   // keyway
-  h3_1 = line(...)                                   // web void
-}
-sec1 = region(point = [147.099, 84.928], sketch = sec1Sk)
-blank = extrude(sec1, length = 50)
-piece = blank
+from wheelwright_occ import build, save
+
+W = 50
+
+SECTIONS = [
+    {"z": 0, "kind": "sector", "segs": [
+        {"kind": "line", "a": [9.2, 0], "b": [16.346, 0]},              # dovetail pocket
+        {"kind": "arc", "a": [177.8, 0], "b": [177.664, 6.965],
+         "center": [0, 0], "ccw": True},                                # tread
+        {"kind": "line", "a": [177.664, 6.965], "b": [174.166, 6.828]}, # bar wall
+        ...
+    ]},
+]
+
+CUTTERS = [
+    # bore
+    {"shape": "circle", "c": [0, 0], "r": 10.2, "z0": 0, "z1": 50},
+    # web void
+    {"shape": "poly", "pts": [[62.1, 14.0], ...], "z0": 0, "z1": 50},
+]
+
+if __name__ == "__main__":
+    for path in save(build(SECTIONS, CUTTERS, W), "piece-A"):
+        print("wrote", path)
 ```
 
-**Booleans are the scarce resource, not entities.** Zoo's engine slows down and then gets
-unreliable as the tool list grows — the demo wheel's twelve cutters took ~80 s, and busier wheels
-came back `Batch edit result is not valid` or dropped the modeling connection outright. So every
-cut that runs the full depth of the piece — bore, keyway, bolt holes, every web void, every tread
-bar — is just another **loop in the same sketch**, and `region()` resolves the material face
-between them in one pass. Same wheel, same 500-triangle solid, **3 s instead of 80 s**. The only
-tools left are cuts that genuinely stop partway through the width (circumferential grooves on a
-flat tread), and those are emitted as sector wedges rather than full rings — subtracting a 360°
-ring from a 60° sector is a sliver boolean, and that one used to hang the engine past five
-minutes on a plain ribbed wheel.
+`build()` does the same two things for every wheel there is:
 
-A crowned or round cross-section is `loft`ed through one such sketch per z level instead of
-extruded:
-
-```kcl
-sec1 = region(point = [...], sketch = sec1Sk)   // z = 0,  shoulder radius
-sec3 = region(point = [...], sketch = sec3Sk)   // z = W/2, full radius
-...
-blank = loft([sec1, sec2, sec3, sec4, sec5])
+```python
+blank = prism(SECTIONS[0], W)      # straight tread: one section
+      | loft(SECTIONS)             # slanted tread: several
+piece = blank - [solid(c) for c in CUTTERS]
 ```
 
-That is forced, not stylistic: the engine refuses any boolean whose operands carry curved faces
-(`cannot handle this 3D subtraction yet` — for revolved *and* lofted tools alike, and for
-`intersect` too), so a crown can never be cut in. It has to be in the profile from the start.
-Lofting costs real engine time — minutes per piece rather than seconds — which is why flat wheels
-keep the single-extrude fast path.
+Every cutter but one is a prism. The exception is the **tire** — the crown and every
+circumferential groove together — whose profile is drawn in the (r, z) half-plane and swept a
+full turn about the axle, so the running surface comes out as a real arc of the section circle.
+Lofting it through sampled heights, which is what a kernel that refuses booleans on curved faces
+forces you into, left the Ø200 round preset **2.99 mm** short at the shoulder — more than that
+tread was deep. The revolve measures 0.0000 mm out on the built STL.
 
-Cutters overshoot the part in Z, boolean tool batches are bounded, and arcs are emitted
-start/end/center in CCW order per the KCL spec — with their endpoints snapped onto a common
-radius, because an arc whose endpoints disagree by a micron is rejected by the engine as a bad
-*region query point* ([WW-3](docs/zoo-api-notes.md#ww-3--a-1-µm-arc-inconsistency-is-reported-as-a-bad-region-query-point)).
-Coordinates print at six decimals for the same reason: a tread bar puts fifty-odd arcs on one rim
-loop, and a loop is only as closed as its worst entity.
+**The bundle builds itself.** Alongside the pieces it carries `wheelwright_occ.py` and
+`build.py` — the geometry code, shipped verbatim. `python build.py .` writes an `.stl` (for
+slicing) and a `.step` (for CAD — FreeCAD, Fusion, SolidWorks and Onshape all open it) next to
+each source file. That is byte-for-byte the code the server runs when you click **Build**, on the
+same files, so there is no private build path that could drift from the one you get.
+
+**Why it is this simple.** It did not use to be. Wheelwright originally emitted KCL for a hosted
+engine, and on that engine booleans were the scarce resource: the demo wheel's twelve cutters
+took ~80 s, busier wheels came back `Batch edit result is not valid` or dropped the modeling
+connection, and no boolean would touch an operand with a curved face — so a crown could never be
+cut, only lofted. Every full-depth cut had to be folded back into the profile as another sketch
+loop to keep the tool count down. OpenCascade has none of those limits, so all of that machinery
+went away and every cut is just a prism again. The 19-configuration matrix builds **19/19, 28
+pieces, 36.6 s of kernel time**, against 14/19 and 85–146 s per piece before. The failure modes
+that shaped the old design are catalogued in
+[docs/zoo-api-notes.md](docs/zoo-api-notes.md), which is now a historical record.
+
+Three rules the emitter still keeps, each earned:
+
+- **Endpoints are never moved.** Consecutive entities in a loop share their endpoint exactly, and
+  the builder chains the wire through shared vertices to keep it that way. The tempting repair —
+  projecting an arc's endpoints onto a mean radius, which the KCL emitter *had* to do — pushes
+  them off their neighbours, and OpenCascade then returns an unclosed wire and a degenerate face
+  rather than an error. A Ø355.6 mm sector prism measured 7 901 mm³ that way, against 612 000.
+- **Arcs are built from three points**, because an arc is over-determined by start, end and
+  centre and the planner rounds all three independently to 1e-3 mm.
+- **Coordinates print at six decimals**, so regenerating a configuration is byte-identical.
 
 ## API
 
@@ -369,10 +390,10 @@ Everything the UI does is plain JSON over HTTP:
 | Endpoint | What |
 |---|---|
 | `POST /api/plan` | Full geometry plan (segments, joints, warnings, per-piece cutters) |
-| `POST /api/kcl` | Generated files as JSON |
-| `POST /api/kcl.zip` | KCL bundle download |
-| `POST /api/export/stl` | STL bundle via the Zoo engine (503 + instructions if CLI/token missing) |
-| `GET /api/health` | Zoo CLI/token status |
+| `POST /api/source` | Generated files as JSON |
+| `POST /api/source.zip` | Source bundle download (self-building) |
+| `POST /api/export/stl` | STL + STEP built by OpenCascade (503 + instructions if the kernel is missing) |
+| `GET /api/health` | Whether the geometry kernel is installed, and which interpreter has it |
 
 Request body = the same parameter object the form produces (all fields optional; see
 `DEFAULTS` in [`src/lib/wheel.js`](src/lib/wheel.js)).
@@ -380,17 +401,19 @@ Request body = the same parameter object the form produces (all fields optional;
 ## Repo layout
 
 ```
-server.js               express: static UI + API + Zoo export proxy
-src/lib/wheel.js        the planner (pure, shared browser/server)
-src/lib/units.js        unit switching: rewrites the form so lengths keep their physical size
-src/lib/kclgen.js       KCL emitter + assembly guide generator
-src/lib/zoo.js          zoo CLI wrapper for KCL → STL
-src/lib/zip.js          dependency-free ZIP writer
-src/lib/env.js          dependency-free .env / .env.local loader
-public/                 UI (vanilla JS + vendored three.js, 2D canvas fallback)
-scripts/setup-zoo.mjs   downloads the Zoo CLI for your platform into ./bin
-scripts/validate-kcl.js engine round-trip validation for a config matrix
-test/                   node:test suite
+server.js                     express: static UI + API + build service
+src/lib/wheel.js              the planner (pure, shared browser/server)
+src/lib/units.js              unit switching: rewrites the form so lengths keep their physical size
+src/lib/occgen.js             bundle emitter + assembly guide generator
+src/lib/occ.js                finds a Python with OpenCascade and runs a bundle through it
+src/lib/occ/wheelwright_occ.py  plan geometry → OpenCascade solid → STL/STEP (ships in every bundle)
+src/lib/occ/build.py            builds every piece in a bundle (ships in every bundle)
+src/lib/zip.js                dependency-free ZIP writer
+src/lib/env.js                dependency-free .env / .env.local loader
+public/                       UI (vanilla JS + vendored three.js, 2D canvas fallback)
+scripts/setup-occ.mjs         creates ./bin/occ-venv with OpenCascade installed
+scripts/validate-occ.js       builds a 19-config matrix through the real kernel
+test/                         node:test suite
 ```
 
 ## Honest limitations & roadmap
@@ -401,30 +424,31 @@ test/                   node:test suite
 - Wheel width taller than the printer Z is warned, not yet auto-split axially.
 - Tread/tenon edges are sharp (no chamfered lead-ins yet); slicers' seam-aware placement and a
   light file fix the first-fit experience.
-- The preview draws tread bars and the crown exactly (both are in the piece profile, and crowned
-  pieces are lofted in the preview too). Circumferential grooves are still an overlay; the KCL
-  subtracts them for real.
-- Crowned and round cross-sections take minutes per piece to export, against seconds for a flat
-  one — lofted surfaces are simply much more work for the engine than extruded ones. The STL
-  export budget allows for it; the configurator says so before you click.
+- The preview draws the tread bars, the crown and the grooves for real — nothing is overlaid on
+  top of the mesh any more. It samples the crown at 40-odd heights spaced by equal arc angle,
+  where the solid carries it as an exact arc, so the mesh is an approximation of the same curve
+  rather than of a different one.
 - A bar can only lean as far as its own pitch cell allows. Ask for a steep chevron and the
   planner spaces the bars out to grant it; pin the bar count as well and the angle gives way
   instead, with a note saying so.
-- Circumferential grooves on a crowned tread are modelled into the section curve, so they come
-  out round-shouldered rather than square, and the count is capped at two (each groove costs
-  three more profiles to loft through).
-- **Engine export is not yet reliable enough to be the only route.** Two of the failure modes we
-  hit were ours and are fixed — the arc-endpoint inconsistency (WW-3) and the boolean count,
-  which is why full-depth cuts stopped being tools at all. That took the live matrix from 5/13 to
-  **14/19**, and no remaining failure is a geometry error: they are all `Modeling command timed
-  out` or `websocket closed early`, and **every one of them has since exported unchanged when
-  re-run** (the round bike tire: ✗ in the batch, ✓ 146 s alone). Runtime doesn't track model size
-  either — we measured a 12-entity file at 417 s and a 69-cutter wheel at 85 s, and one file that
-  exported in 70 s hung past 900 s an hour later. Every measurement, repro and suggested fix is
-  in [docs/zoo-api-notes.md](docs/zoo-api-notes.md); the KCL download and Design Studio remain
-  the dependable path, which is why they're first-class in the UI.
-- Wishlist: Text-to-CAD hub-cap emblems ("a snarling wolf, embossed"), mass/inertia estimates
-  via Zoo's file API, chamfered joint lead-ins, per-piece print-time estimates.
+- Circumferential grooves are cut to a constant depth measured *perpendicular* to the tread, so
+  on a crowned tire they sit a little shallower in radius near the shoulders than at the
+  centreline. That is what a moulded groove does; a constant radial depth would run out through
+  the shoulder.
+- A **slanted tread** (`angled`, `chevron`) is the one thing left that varies the piece profile
+  with height, so it is the only case that still lofts and the only one the section-congruence
+  rule still binds. Everything else — crowned and round sections included — is a single prism
+  plus one revolved cut.
+- The preview reads **1–3 % light on a slanted tread**: it samples each profile as a polyline and
+  rules between the sampled rings, where the kernel lofts the exact wires. On every other
+  configuration it now agrees with the built solid to better than 0.1 %.
+- Building needs a Python 3.9–3.13 with `cadquery-ocp` (~400 MB installed). `npm run setup:occ`
+  handles it, but it is a real second runtime next to Node. On Windows, keep the venv path
+  short: OpenCascade's DLLs hit `MAX_PATH` under a deep checkout, and the setup script warns
+  before it spends the download.
+- Wishlist: 3MF export (STL and STEP are in), mass/inertia from the B-rep — OpenCascade already
+  computes the volume the validator prints — chamfered joint lead-ins, per-piece print-time
+  estimates.
 
 ## License
 

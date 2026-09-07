@@ -1,5 +1,5 @@
 // Minimal ZIP writer (store method, no compression) — zero dependencies.
-// Good enough for bundling a handful of KCL/STL files for download.
+// Good enough for bundling a handful of source/STL files for download.
 
 const CRC_TABLE = (() => {
   const t = new Uint32Array(256);

@@ -4,7 +4,7 @@ import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadEnv } from '../src/lib/env.js';
-import { resolveToken } from '../src/lib/zoo.js';
+import { occStatus } from '../src/lib/occ.js';
 
 function withTempDir(fn) {
   const dir = mkdtempSync(join(tmpdir(), 'ww-env-'));
@@ -64,18 +64,16 @@ test('missing .env files are fine', () => {
   });
 });
 
-test('resolveToken: per-request override beats env, blank means null', () => {
-  const saved = { a: process.env.ZOO_API_TOKEN, b: process.env.ZOO_TOKEN, c: process.env.KITTYCAD_API_TOKEN };
-  delete process.env.ZOO_TOKEN;
-  delete process.env.KITTYCAD_API_TOKEN;
-  process.env.ZOO_API_TOKEN = 'env-token';
-  assert.equal(resolveToken(), 'env-token');
-  assert.equal(resolveToken('browser-token'), 'browser-token');
-  assert.equal(resolveToken('  '), 'env-token', 'whitespace override falls through to env');
-  delete process.env.ZOO_API_TOKEN;
-  assert.equal(resolveToken(), null);
-  assert.equal(resolveToken('  x  '), 'x');
-  if (saved.a !== undefined) process.env.ZOO_API_TOKEN = saved.a;
-  if (saved.b !== undefined) process.env.ZOO_TOKEN = saved.b;
-  if (saved.c !== undefined) process.env.KITTYCAD_API_TOKEN = saved.c;
+test('occStatus reports a usable shape whether or not OpenCascade is installed', () => {
+  // There is no token to resolve any more — the kernel is local, so the only
+  // question is which interpreter has it. The server renders this object
+  // straight into the status pill, so its shape matters even when nothing is
+  // installed.
+  const s = occStatus();
+  assert.equal(typeof s.python, 'boolean');
+  assert.equal(s.ready, s.python);
+  if (s.python) {
+    assert.equal(typeof s.pythonPath, 'string');
+    assert.match(s.occtVersion, /^\d+\.\d+/, 'OCP reports its OpenCascade version');
+  }
 });

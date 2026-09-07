@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Wheelwright — printable wheel configurator (Zoo API)</title>
+<title>Wheelwright — printable wheel configurator</title>
 <link rel="stylesheet" href="style.css" />
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🛞</text></svg>" />
 <script type="importmap">
@@ -19,23 +19,18 @@
     <span class="logo">🛞</span>
     <div>
       <h1>Wheelwright</h1>
-      <p>Any wheel, any printer — parametric segments that slide together. Powered by <a href="https://zoo.dev" target="_blank" rel="noreferrer">Zoo</a>'s KCL + Design API.</p>
+      <p>Any wheel, any printer — parametric segments that slide together. Solids built locally with <a href="https://dev.opencascade.org/" target="_blank" rel="noreferrer">OpenCascade</a>.</p>
     </div>
   </div>
-  <div class="header-right token-wrap">
-    <button id="zooStatus" class="pill" type="button">checking Zoo…</button>
-    <div id="tokenPanel" class="token-panel hidden">
-      <h3>Zoo connection</h3>
+  <div class="header-right kernel-wrap">
+    <button id="occStatus" class="pill" type="button">checking…</button>
+    <div id="kernelPanel" class="kernel-panel hidden">
+      <h3>Geometry kernel</h3>
       <ul id="healthList" class="health-list"></ul>
-      <div id="cliHint" class="cli-hint hidden">npm run setup:zoo</div>
-      <p class="hint">Set <code>ZOO_API_TOKEN</code> in <code>.env</code> (preferred, see <code>.env.example</code>) — or paste a token here. It stays in this browser only and rides each request; the server never stores it.</p>
-      <input id="tokenInput" type="password" placeholder="zoo-api-token…" autocomplete="off" spellcheck="false" />
-      <div class="token-actions">
-        <a href="https://zoo.dev/account/api-tokens" target="_blank" rel="noreferrer">Get a token ↗</a>
-        <span>
-          <button id="tokenClear" type="button">Clear</button>
-          <button id="tokenSave" type="button" class="primary">Save</button>
-        </span>
+      <div id="cliHint" class="cli-hint hidden">npm run setup:occ</div>
+      <p class="hint">No account and no token: the kernel runs on this machine. <code>npm run setup:occ</code> installs it into <code>./bin</code>, or point <code>WHEELWRIGHT_PYTHON</code> at any Python that already has <code>cadquery-ocp</code>.</p>
+      <div class="kernel-actions">
+        <a href="https://dev.opencascade.org/" target="_blank" rel="noreferrer">About OpenCascade ↗</a>
       </div>
     </div>
   </div>
@@ -147,7 +142,7 @@
         </select>
       </label>
       <label data-show="profileShape:crowned">Crown drop at shoulder (0 = auto) <input id="crownDrop" type="number" step="any" min="0" value="0" /></label>
-      <p class="hint" data-show="profileShape:crowned,round">A curved tread is lofted rather than extruded, so STL export takes a few minutes per piece.</p>
+      <p class="hint" data-show="profileShape:crowned,round">A curved tread is lofted through several profiles rather than extruded once — a couple of seconds a piece to build, against a fraction of one for a flat wheel.</p>
     </section>
 
     <section>
@@ -203,8 +198,8 @@
     <section>
       <h2>Fabricate</h2>
       <div class="btn-row">
-        <button id="dlKclZip" class="primary">Download KCL bundle (.zip)</button>
-        <button id="dlStl">Export STL via Zoo</button>
+        <button id="dlSourceZip" class="primary">Download source bundle (.zip)</button>
+        <button id="dlStl">Build STL + STEP</button>
       </div>
       <div id="fileLinks"></div>
       <div id="exportMsg" class="hint"></div>

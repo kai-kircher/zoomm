@@ -71,7 +71,7 @@ download the KCL bundle and run `zoo kcl export --output-format=stl piece-A.kcl 
 export from Design Studio.
 
 ```sh
-npm test           # 115 unit tests: chunking math, joints, dedupe, piece profiles, every web pattern's wall and overlap guarantees, KCL well-formedness
+npm test           # 116 unit tests: chunking math, joints, dedupe, piece profiles, every web pattern's wall and overlap guarantees, KCL well-formedness
 npm run validate:kcl   # regenerates a 19-config matrix; round-trips through Zoo's engine when a token is set
 ```
 

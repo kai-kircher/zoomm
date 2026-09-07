@@ -42,7 +42,7 @@ The kernel pill in the top-right tells you where you stand:
 
 | Pill | Meaning |
 | --- | --- |
-| `build ready` | OpenCascade found — **Build STL + STEP** works. |
+| `build ready` | OpenCascade found — the **Build** button works. |
 | `kernel setup` | Not installed; open the panel for the command. The source bundle still downloads. |
 | `static mode` | `/api/health` didn't answer — you are on a static host, or the server is down. |
 
@@ -80,9 +80,11 @@ carries the build code, so you can always run `python build.py .` in it.
 5. **Take the geometry.** *Download source bundle (.zip)* gives you
    `piece-A.py`, `piece-B.py`, the two build files, `ASSEMBLY.md` and
    `wheelwright.json`.
-6. **Get the solids.** Either press *Build STL + STEP*, or run
+6. **Get the solids.** Tick the formats you want — `.stl` for slicing, `.step`
+   for CAD, both by default — and press *Build*. Or run
    `pip install cadquery-ocp && python build.py .` inside the bundle and
-   export from there.
+   export from there, where the same choice is `--formats stl` or
+   `--formats step`.
 
 ---
 
@@ -275,7 +277,7 @@ The wheel's **width** is never split — it must fit printer Z.
 | File | Contents |
 | --- | --- |
 | `piece-A.py`, `piece-B.py`, … | One file per **unique** piece: its boundary and the prisms to subtract. Print-flat on XY. |
-| `wheelwright_occ.py`, `build.py` | The geometry code itself, shipped verbatim. `python build.py .` turns the pieces into STL and STEP. |
+| `wheelwright_occ.py`, `build.py` | The geometry code itself, shipped verbatim. `python build.py .` turns the pieces into STL and STEP; `--formats stl` or `--formats step` for one of them. |
 | `ASSEMBLY.md` | Print quantities and footprints, print settings, the glue-up sequence for your material, the build commands, and any warnings. |
 | `wheelwright.json` | Machine-readable manifest: the full parameter set, segment count, piece list with quantities, footprint, warnings and notes. |
 
@@ -377,7 +379,7 @@ roadmap. Wheelwright says so rather than emitting parts that can't be printed.
 
 | Symptom | Cause | Fix |
 | --- | --- | --- |
-| **Build STL + STEP** returns 503 `no-python` | No interpreter with OpenCascade on this server | `npm run setup:occ`, restart. Or `pip install cadquery-ocp` yourself and set `WHEELWRIGHT_PYTHON` to that interpreter. |
+| **Build** returns 503 `no-python` | No interpreter with OpenCascade on this server | `npm run setup:occ`, restart. Or `pip install cadquery-ocp` yourself and set `WHEELWRIGHT_PYTHON` to that interpreter. |
 | `npm run setup:occ` says no suitable Python | Only a too-new (or too-old) Python is installed | `cadquery-ocp` ships wheels for 3.9–3.13. Install one from python.org and re-run, or set `PYTHON` to a suitable interpreter. |
 | `ImportError: DLL load failed … filename or extension is too long` (Windows) | OpenCascade's DLLs hit `MAX_PATH` under a deep checkout | Create the venv somewhere short (e.g. `C:\occ-venv`) and point `WHEELWRIGHT_PYTHON` at its `python.exe`. |
 | 500 `build-failed` naming a piece | The kernel could not build that piece's geometry | Download the source bundle and run `python build.py .` for the full traceback, then please report the configuration. |

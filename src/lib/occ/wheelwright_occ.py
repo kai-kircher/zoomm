@@ -51,6 +51,7 @@ from OCP.BRepOffsetAPI import BRepOffsetAPI_ThruSections
 from OCP.BRepPrimAPI import BRepPrimAPI_MakePrism, BRepPrimAPI_MakeRevol
 from OCP.GC import GC_MakeArcOfCircle
 from OCP.GProp import GProp_GProps
+from OCP.IFSelect import IFSelect_ReturnStatus
 from OCP.STEPControl import STEPControl_StepModelType, STEPControl_Writer
 from OCP.ShapeUpgrade import ShapeUpgrade_UnifySameDomain
 from OCP.StlAPI import StlAPI_Writer
@@ -377,7 +378,16 @@ def write_stl(shape, path, deflection=STL_DEFLECTION, angular=STL_ANGULAR):
 def write_step(shape, path):
     writer = STEPControl_Writer()
     writer.Transfer(shape, STEPControl_StepModelType.STEPControl_AsIs)
-    writer.Write(str(path))
+    # Write() reports failure in its return status rather than raising, so an
+    # unchecked call turns a STEP that was never written into a piece that is
+    # simply missing from the export.
+    if writer.Write(str(path)) != IFSelect_ReturnStatus.IFSelect_RetDone:
+        raise RuntimeError(f"could not write {path}")
+
+
+# The formats `save` knows how to write. EXPORT_FORMATS in src/lib/occ.js is the
+# other half of this; keep the two in step.
+WRITERS = {"stl": write_stl, "step": write_step}
 
 
 def save(shape, stem, formats=("stl", "step"), out_dir="."):
@@ -386,7 +396,11 @@ def save(shape, stem, formats=("stl", "step"), out_dir="."):
 
     written = []
     for fmt in formats:
+        if fmt not in WRITERS:
+            raise ValueError(
+                f"unknown export format {fmt!r} — known: {', '.join(WRITERS)}"
+            )
         path = os.path.join(out_dir, f"{stem}.{fmt}")
-        (write_stl if fmt == "stl" else write_step)(shape, path)
+        WRITERS[fmt](shape, path)
         written.append(path)
     return written

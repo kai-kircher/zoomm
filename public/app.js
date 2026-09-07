@@ -359,8 +359,32 @@ $('dlSourceZip').addEventListener('click', async () => {
   }
 });
 
+// Which formats the kernel is asked for. Both by default — STEP costs little
+// on top of the solid that has already been built — but STL alone is the
+// smaller download when the wheel is only going to a slicer, and STEP alone is
+// what you want when it is going back into CAD.
+const FORMAT_BOXES = { stl: 'fmtStl', step: 'fmtStep' };
+
+const chosenFormats = () =>
+  Object.entries(FORMAT_BOXES).filter(([, id]) => $(id).checked).map(([fmt]) => fmt);
+
+const formatLabel = (formats) => formats.map((f) => f.toUpperCase()).join(' + ');
+
+function syncFormats(cleared) {
+  // Building nothing is not a state worth having, so the last box on cannot be
+  // turned off — clearing it re-checks it instead of disabling the button.
+  if (cleared && !chosenFormats().length) cleared.checked = true;
+  $('dlStl').textContent = `Build ${formatLabel(chosenFormats())}`;
+}
+
+for (const id of Object.values(FORMAT_BOXES)) {
+  $(id).addEventListener('change', () => syncFormats($(id)));
+}
+syncFormats(); // the label follows the boxes, not the markup's guess at them
+
 $('dlStl').addEventListener('click', async () => {
   const btn = $('dlStl');
+  const formats = chosenFormats();
   btn.disabled = true;
   btn.textContent = 'Building…';
   // A whole wheel is a few seconds; a lofted one is a few seconds more. Say
@@ -372,14 +396,14 @@ $('dlStl').addEventListener('click', async () => {
       : `Building ${plan.uniquePieces.length} piece(s).`;
   $('exportMsg').classList.remove('err');
   try {
-    await postForBlob('/api/export/stl', 'Build failed');
-    $('exportMsg').textContent = 'STL + STEP bundle downloaded.';
+    await postForBlob(`/api/export/stl?formats=${formats.join(',')}`, 'Build failed');
+    $('exportMsg').textContent = `${formatLabel(formats)} bundle downloaded.`;
   } catch (e) {
     $('exportMsg').textContent = e.message;
     $('exportMsg').classList.add('err');
   } finally {
     btn.disabled = false;
-    btn.textContent = 'Build STL + STEP';
+    btn.textContent = `Build ${formatLabel(chosenFormats())}`;
   }
 });
 

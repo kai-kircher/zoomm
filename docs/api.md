@@ -160,14 +160,33 @@ ZIP of the solids plus the assembly guide and manifest.
 curl -s localhost:3000/api/export/stl -H 'content-type: application/json'   -d '{"diameter":120,"width":30}' -o wheel-stl.zip
 ```
 
-Both `.stl` (for slicing) and `.step` (for CAD) are built by default. Narrow it
-with `?formats=stl`.
+### Choosing formats
+
+`?formats=` picks what the kernel writes. Both `.stl` (for slicing) and `.step`
+(for CAD) are built by default, because STEP costs little on top of the solid
+that has already been built.
+
+| Query | Builds | Download named |
+| --- | --- | --- |
+| *(omitted)* | STL + STEP | `<slug>-stl-step.zip` |
+| `?formats=stl` | STL | `<slug>-stl.zip` |
+| `?formats=step` | STEP | `<slug>-step.zip` |
+| `?formats=stl,step` | STL + STEP | `<slug>-stl-step.zip` |
+
+Names are case-insensitive, order-insensitive and de-duplicated, so
+`?formats=STEP,stl` and `?formats=stl,step` are the same request and produce the
+same filename. Anything else — `?formats=obj`, or a `?formats=` list that comes
+out empty — is a 400 naming the format it did not know, rather than a build that
+quietly writes the wrong thing.
+
+The zip always carries the assembly guide and manifest alongside whichever
+solids were built.
 
 Errors are JSON with a machine-readable `code` and a human `how`:
 
 | Status | `code` | Meaning |
 | --- | --- | --- |
-| 400 | — | The parameters could not be planned. |
+| 400 | — | The parameters could not be planned, or `?formats=` named a format the kernel cannot write. |
 | 503 | `no-python` | No interpreter with OpenCascade was found on the server. |
 | 500 | `build-failed` | The kernel could not build a piece. The message names the piece and carries the Python exception. |
 

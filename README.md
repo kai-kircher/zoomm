@@ -39,7 +39,7 @@ and the glue-up instructions.
   prisms to subtract from it, as plain data — lying
   print-flat on XY. Plus a generated `ASSEMBLY.md` (print settings, adhesive choice, glue-up
   steps) and a JSON manifest.
-- **OpenCascade makes the solids**: one click for STL *and* STEP, or run `python build.py .`
+- **OpenCascade makes the solids**: one click for STL, STEP or both, or run `python build.py .`
   in the bundle you downloaded — it ships with the same geometry code the app runs.
 
 | Airless TPU rover wheel (flex-web, hex bore) | Printer-fit check against your envelope |
@@ -361,6 +361,12 @@ slicing) and a `.step` (for CAD — FreeCAD, Fusion, SolidWorks and Onshape all 
 each source file. That is byte-for-byte the code the server runs when you click **Build**, on the
 same files, so there is no private build path that could drift from the one you get.
 
+Both formats are on by default because STEP costs little once the solid exists — but they are
+tickboxes under **Fabricate**, and `build.py` takes the same choice as `--formats stl` or
+`--formats step`. STL is the smaller download when the wheel is only going to a slicer; STEP is
+what you want when it is going back into CAD, since it carries the real arcs and planes rather
+than a triangle soup.
+
 **Why it is this simple.** It did not use to be. Wheelwright originally emitted KCL for a hosted
 engine, and on that engine booleans were the scarce resource: the demo wheel's twelve cutters
 took ~80 s, busier wheels came back `Batch edit result is not valid` or dropped the modeling
@@ -392,7 +398,7 @@ Everything the UI does is plain JSON over HTTP:
 | `POST /api/plan` | Full geometry plan (segments, joints, warnings, per-piece cutters) |
 | `POST /api/source` | Generated files as JSON |
 | `POST /api/source.zip` | Source bundle download (self-building) |
-| `POST /api/export/stl` | STL + STEP built by OpenCascade (503 + instructions if the kernel is missing) |
+| `POST /api/export/stl` | STL and/or STEP built by OpenCascade — `?formats=stl,step`, both by default (503 + instructions if the kernel is missing) |
 | `GET /api/health` | Whether the geometry kernel is installed, and which interpreter has it |
 
 Request body = the same parameter object the form produces (all fields optional; see

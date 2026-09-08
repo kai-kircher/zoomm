@@ -249,13 +249,8 @@ const PROFILE_BORES = [
   ['bolt', { type: 'bolt' }],
 ];
 
-// Two wheels, because the profile is the outline plus every web cell as a
-// hole and both have to come out simple. The spoke web is not among them:
-// its gap quads have a self-crossing of their own that has nothing to do
-// with the dovetails (the guard on the gap angle takes `mod(...)` of a span
-// that can be negative, so a gap whose two edges have already crossed at the
-// inner web circle reads as one 359° wide and is kept). Ø200 spokes at 12
-// segments is the shortest repro; it is untouched here and still open.
+// Three wheels, because the profile is the outline plus every web cell as a
+// hole and all of them have to come out simple.
 const PROFILE_WHEELS = [
   // The wheel the fold was found on: a lugged tread notches the outer
   // boundary and a solid web leaves the sector faces as the only other detail.
@@ -263,6 +258,15 @@ const PROFILE_WHEELS = [
   // Big enough that the solver reaches 16 segments unprompted, with a crowned
   // section and a web whose cells add dozens of loops to the same profile.
   ['Ø500 honeycomb crowned', { diameter: 500, width: 60, infill: 'honeycomb', tread: 'ribbed', profile: { shape: 'crowned', crownDrop: 4 } }],
+  // The spoke web, whose gap quads folded for a reason of their own and not
+  // for the dovetails': the two lines bounding a gap are offset from
+  // neighbouring *rays*, so they converge going inward and on a narrow wedge
+  // met before the inner web circle. The guard took `mod(...)` of the gap's
+  // angular span, which maps a negative one onto ~359°, so exactly the folded
+  // gaps read as generously wide and were kept (wheel.js now measures that
+  // span from the offsets, where it stays signed). Ø200 at 12 segments was
+  // the shortest repro and is inside the sweep below.
+  ['Ø200 spokes', { diameter: 200, infill: 'spokes', tread: 'lugged', profile: { shape: 'flat' } }],
 ];
 
 test('no piece profile crosses itself, at any segment count', () => {

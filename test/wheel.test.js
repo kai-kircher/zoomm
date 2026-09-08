@@ -857,6 +857,112 @@ test('a web band too narrow for the pattern falls back to solid and says so', ()
   }
 });
 
+// --- spoke gaps -------------------------------------------------------------
+
+// The gap between two ribs is a quad: out along one rib's offset line, round
+// the outer web circle, back down the next rib's offset line, round the inner
+// one. Each offset line is parallel to a *ray*, not to its neighbour, so the
+// two converge going inward — and where the wedge is narrow and the seam
+// keep-out wide they meet before reaching the inner web circle, leaving the
+// quad a bowtie. A loop that crosses itself has no defined interior, so
+// ExtrudeGeometry tears the preview caps and OpenCascade answers it with a
+// solid that fails its own validity check. The guard meant to catch this took
+// mod() of the gap's angular span, and mod() maps a negative span onto ~359°,
+// so a gap whose two edges had already crossed read as a generously wide one.
+// Ø200 spokes at 12 segments is the shortest repro; Ø500 reaches it at the
+// count the solver picks unprompted, so it was never override-only.
+
+// A cutter outline as a point list, arcs sampled — loopOf above keeps only the
+// corners, which is enough for the straight-edged chart cells but not for a
+// gap whose inner arc is where the fold shows. Follows preview.js's own
+// convention, where `ccw` says which way round the centre the arc travels, so
+// a folded gap's inner arc unwraps the long way round here exactly as it does
+// in the preview.
+function cutterLoop(c, per = 48) {
+  const TAU = Math.PI * 2;
+  const ang = ([x, y], [cx, cy]) => Math.atan2(y - cy, x - cx);
+  const pts = [];
+  for (const s of c.segs) {
+    if (s.kind === 'line') {
+      pts.push(s.a);
+      continue;
+    }
+    const a0 = ang(s.a, s.center);
+    let a1 = ang(s.b, s.center);
+    if (s.ccw) a1 = a1 <= a0 ? a1 + TAU * Math.ceil((a0 - a1) / TAU + 1e-9) : a1;
+    else a1 = a1 >= a0 ? a1 - TAU * Math.ceil((a1 - a0) / TAU + 1e-9) : a1;
+    for (let i = 0; i < per; i++) {
+      const a = a0 + ((a1 - a0) * i) / per;
+      pts.push([s.center[0] + s.radius * Math.cos(a), s.center[1] + s.radius * Math.sin(a)]);
+    }
+  }
+  return pts;
+}
+
+// The first pair of non-adjacent edges of a closed loop that properly cross,
+// or null. Neighbours share an endpoint, which segsCross already declines to
+// call a crossing, but they are skipped outright so a zero-length sliver
+// cannot read as one.
+function loopSelfIntersects(loop) {
+  const n = loop.length;
+  for (let i = 0; i < n; i++) {
+    for (let k = i + 2; k < n; k++) {
+      if (i === 0 && k === n - 1) continue;
+      if (segsCross(loop[i], loop[i + 1], loop[k], loop[(k + 1) % n])) return [i, k];
+    }
+  }
+  return null;
+}
+
+test('spoke gaps are never cut as bowties, at any segment count', () => {
+  let gaps = 0;
+  let solid = 0;
+  for (const diameter of [80, 160, 200, 250, 355.6, 420, 500, 600]) {
+    for (const type of ['plain', 'keyed', 'hex', 'dbore', 'bolt']) {
+      for (let N = 1; N <= 16; N++) {
+        const plan = planWheel({ diameter, infill: 'spokes', bore: { type }, segmentsOverride: N });
+        const cutters = plan.uniquePieces[0].cutters.filter((c) => /^spoke\d+$/.test(c.id));
+        if (!cutters.length) {
+          solid++;
+          continue;
+        }
+        const what = `Ø${diameter} ${type} bore, N=${plan.N}`;
+        for (const c of cutters) {
+          const loop = cutterLoop(c);
+          const x = loopSelfIntersects(loop);
+          gaps++;
+          assert.equal(x, null, x && `${what}: ${c.id} folds — edges ${x.join(' × ')} of ${loop.length} cross`);
+          // And the seed that tells the kernel and the preview which side is
+          // inside really does lie inside the gap it names.
+          assert.ok(pointInLoop(c.interior, loop), `${what}: ${c.id} seed sits outside its own gap`);
+        }
+      }
+    }
+  }
+  // The sweep has to be cutting gaps, not merely rejecting them all: a guard
+  // that turned every spoke web solid would otherwise pass this in silence.
+  assert.ok(gaps > 400, `the sweep really cut spoke gaps (${gaps} checked, ${solid} webs left solid)`);
+});
+
+test('a wedge too narrow for a spoke gap leaves the web solid and says so', () => {
+  // Both repros: the first needs the override, the second is the count the
+  // solver reaches on its own, so neither is an artefact of forcing N.
+  for (const [what, opts] of [
+    ['Ø200 at N=12', { diameter: 200, infill: 'spokes', segmentsOverride: 12 }],
+    ['Ø500 at the count the solver picks', { diameter: 500, infill: 'spokes' }],
+  ]) {
+    const plan = planWheel(opts);
+    assert.ok(plan.radii.rWebOut - plan.radii.rWebIn > 8, `${what}: the band is wide enough that spokes were attempted`);
+    assert.deepEqual(
+      plan.uniquePieces[0].cutters.filter((c) => /^spoke\d+$/.test(c.id)),
+      [],
+      `${what}: a gap the keep-outs leave no room for is not cut at all`
+    );
+    assert.equal(plan.infillInfo.style, 'solid', `${what}: the plan reports the web it actually built`);
+    assert.ok(plan.notes.some((n) => /web left solid/i.test(n)), `${what}: and says so in the build notes`);
+  }
+});
+
 // --- bolt holes vs segment seams -------------------------------------------
 
 // Reassemble the full wheel's bolt holes: every bolt cutter of every piece,

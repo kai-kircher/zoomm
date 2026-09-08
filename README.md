@@ -74,8 +74,8 @@ you download the source bundle and run `pip install cadquery-ocp && python build
 which is the same code, on the same files, that the server would have run.
 
 ```sh
-npm test           # 196 unit tests: chunking math, joints, dedupe, piece profiles, every web pattern's wall and overlap guarantees, material-zone boundaries, emitted-bundle geometry
-npm run validate   # regenerates a 26-config matrix and builds every piece through the real kernel
+npm test           # 200 unit tests: chunking math, joints, dedupe, piece profiles, every web pattern's wall and overlap guarantees, material-zone boundaries, emitted-bundle geometry
+npm run validate   # regenerates a 27-config matrix and builds every piece through the real kernel
 ```
 
 ## Documentation
@@ -152,6 +152,11 @@ half-open hole.
 
 The patterned webs cooperate: every cell is placed clear of the seam keep-outs and repeats per
 segment, so a web never costs you a unique piece and never leaves a joint half-cut.
+
+The spoke web answers to the same keep-outs, from the other side: its ribs are the material
+*between* the gaps, so the gap is what has to clear both seams. Split a wheel far enough and the
+two keep-outs meet before the gap reaches the hub — there is no gap left to cut, and the web is
+left solid with a note saying so rather than cut as a sliver.
 
 ## The airless webs
 
@@ -536,7 +541,7 @@ src/lib/zip.js                dependency-free ZIP writer
 src/lib/env.js                dependency-free .env / .env.local loader
 public/                       UI (vanilla JS + vendored three.js, 2D canvas fallback)
 scripts/setup-occ.mjs         creates ./bin/occ-venv with OpenCascade installed
-scripts/validate-occ.js       builds a 24-config matrix through the real kernel
+scripts/validate-occ.js       builds a 27-config matrix through the real kernel
 test/                         node:test suite
 ```
 

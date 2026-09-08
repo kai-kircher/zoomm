@@ -29,6 +29,10 @@ const CONFIGS = [
   ['lattice-chevron-sharp', { diameter: 300, width: 50, infill: 'lattice', tread: 'lugged', lattice: { rows: 1, cornerRadius: 0 } }],
   ['auxetic-reentrant-hex', { diameter: 200, width: 40, material: 'tpu', infill: 'auxetic', tread: 'lugged', bore: { type: 'hex', hexAcrossFlats: 13 }, auxetic: { rings: 2, waist: 0.4 } }],
   ['voronoi-organic-bolt', { diameter: 180, width: 40, infill: 'voronoi', tread: 'slick', bore: { type: 'bolt', boltCount: 5, boltCircle: 70, boltHoleDia: 5.5, pilotDia: 14 }, voronoi: { seed: 7 } }],
+  // Graded rings put a wide range of cell sizes in one wheel — the smallest
+  // loops the kernel is asked to cut sit next to the largest.
+  ['graded-rings-keyed', { diameter: 355.6, width: 50, infill: 'graded', tread: 'lugged' }],
+  ['graded-swirled-diamonds', { diameter: 160, width: 45, infill: 'graded', tread: 'slick', bore: { type: 'bolt' }, graded: { cellShape: 'diamond', swirl: 30, rings: 2 } }],
   ['wagon-bolt-segmented', { diameter: 355.6, bore: { type: 'bolt', boltCount: 4, boltCircle: 60, boltHoleDia: 5.5, pilotDia: 12 } }],
   ['dbore-diamond-solid', { diameter: 200, width: 45, infill: 'solid', tread: 'diamond', bore: { type: 'dbore', diameter: 12 } }],
   ['cart-bolt-segmented', { bore: { type: 'bolt' }, infill: 'solid', tread: 'slick' }],

@@ -288,6 +288,24 @@ test('a crowned piece previews as a crowned mesh, not a cylinder', () => {
 // A stitched mesh is easy to get subtly wrong — a dropped quad, a cap wound
 // the wrong way, a triangulation borrowed from the wrong end. Every interior
 // edge belonging to exactly two faces catches all three.
+//
+// Edges are counted between *positions*, not vertex indices: the mesh splits a
+// vertex once per surface meeting on it, so the shading can keep the piece's
+// edges hard (see creasedNormals) and one physical corner is several indices.
+// The split copies a position verbatim, so exact equality is the right weld —
+// rounding here would instead merge the collapsed bar windows, which sit as
+// close as 1e-6 mm apart and are deliberately kept distinct.
+const weldByPosition = (pos) => {
+  const seen = new Map();
+  const of = new Uint32Array(pos.count);
+  for (let i = 0; i < pos.count; i++) {
+    const k = `${pos.getX(i)},${pos.getY(i)},${pos.getZ(i)}`;
+    if (!seen.has(k)) seen.set(k, seen.size);
+    of[i] = seen.get(k);
+  }
+  return of;
+};
+
 test('lofted preview meshes are watertight and face outwards', () => {
   const CASES = [
     ['round, one piece', { diameter: 200, width: 28, tread: 'slick', infill: 'solid', profile: { shape: 'round' }, bore: { type: 'plain', diameter: 12 } }],
@@ -300,10 +318,18 @@ test('lofted preview meshes are watertight and face outwards', () => {
     const geo = buildLoftGeometry(THREE, plan, plan.uniquePieces[0]);
     assert.ok(geo, `${name}: geometry built`);
     const idx = geo.getIndex().array;
+    const pos = geo.getAttribute('position');
+    const weld = weldByPosition(pos);
     const edges = new Map();
     for (let i = 0; i < idx.length; i += 3) {
-      const t = [idx[i], idx[i + 1], idx[i + 2]];
-      assert.equal(new Set(t).size, 3, `${name}: no degenerate triangles`);
+      const raw = [idx[i], idx[i + 1], idx[i + 2]];
+      assert.equal(new Set(raw).size, 3, `${name}: no triangle repeats a vertex`);
+      // A collapsed bar window is fanned back in as a triangle with no area,
+      // to give the side strips' repeated points a second face. Welded, its
+      // two coincident corners become one and its own two copies of the
+      // surviving edge cancel, so it neither closes nor opens anything.
+      const t = raw.map((v) => weld[v]);
+      if (new Set(t).size < 3) continue;
       for (let k = 0; k < 3; k++) {
         const a = t[k];
         const b = t[(k + 1) % 3];
@@ -312,9 +338,9 @@ test('lofted preview meshes are watertight and face outwards', () => {
       }
     }
     assert.equal([...edges.values()].filter((v) => v !== 2).length, 0, `${name}: every edge shared by two faces`);
-    // Normals on the tread band must point away from the axis.
-    geo.computeVertexNormals();
-    const pos = geo.getAttribute('position');
+    // Normals on the tread band must point away from the axis. These are the
+    // normals the mesh ships with, not a recomputed set — they are the thing
+    // the renderer actually shades by.
     const nrm = geo.getAttribute('normal');
     let outward = 0;
     for (let i = 0; i < pos.count; i++) {
@@ -327,6 +353,97 @@ test('lofted preview meshes are watertight and face outwards', () => {
       if (dot > 0.3) outward++;
     }
     assert.ok(outward > 0, `${name}: tread surface found and facing out`);
+  }
+});
+
+// The shaped mesh is indexed, so a rim vertex sits on the end cap and on the
+// side wall at once and a void's corner sits on both walls meeting there.
+// Averaging a vertex over all of them — which is all `computeVertexNormals`
+// can do — rounds the shading off every hard edge the piece has: pockets read
+// as funnels, and each cap picks up a fan of streaks off its own rim, because
+// earcut's long thin triangles carry the tilted rim normals a long way inward.
+// It showed up first on crowned wheels, only because a flat slick tread never
+// takes this path at all.
+//
+// The two halves of the property pull against each other, so both are pinned:
+// hard where the piece has an edge, smooth where it has a curve.
+test('shaped meshes shade hard at edges and smooth along the crown', () => {
+  const CASES = [
+    ['crowned + bars', { tread: 'lugged', profile: { shape: 'crowned', crownDrop: 5 } }],
+    ['flat + grooves', { tread: 'ribbed', infill: 'honeycomb' }],
+    ['angled bars, flat', { tread: 'angled', treadAngle: 30 }],
+    ['crowned slick', { tread: 'slick', profile: { shape: 'crowned', crownDrop: 5 } }],
+    ['round section', { diameter: 200, width: 28, tread: 'slick', infill: 'solid', profile: { shape: 'round' }, bore: { type: 'plain', diameter: 12 } }],
+  ];
+  for (const [name, cfg] of CASES) {
+    const plan = planWheel(cfg);
+    const geo = buildLoftGeometry(THREE, plan, plan.uniquePieces[0]);
+    const pos = geo.getAttribute('position');
+    const nrm = geo.getAttribute('normal');
+    const idx = geo.getIndex().array;
+
+    // The far cap is exactly the +Z plane, so any tilt in a corner it shades
+    // with is shading error and nothing else. Only triangles with real area
+    // count: the bore fold and the collapsed windows leave slivers that draw
+    // nothing, and their direction is noise by construction.
+    let capCorners = 0;
+    for (let i = 0; i < idx.length; i += 3) {
+      const t = [idx[i], idx[i + 1], idx[i + 2]];
+      if (!t.every((v) => Math.abs(pos.getZ(v) - plan.W) < 1e-9)) continue;
+      const [a, b, c] = t.map((v) => [pos.getX(v), pos.getY(v)]);
+      const area = Math.abs((b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1])) / 2;
+      if (area < 1e-4) continue;
+      for (const v of t) {
+        capCorners++;
+        // A round section meets its own side face tangentially, so there the
+        // crown really does carry on into the cap and a couple of degrees of
+        // tilt is the surface, not a smear.
+        const tol = plan.profile.crownDrop >= plan.W / 2 - 1e-9 ? 3 : 0.01;
+        const tilt = (Math.acos(Math.min(1, Math.max(-1, nrm.getZ(v)))) * 180) / Math.PI;
+        assert.ok(tilt < tol, `${name}: cap corner shades +Z (off by ${tilt.toFixed(1)}°)`);
+      }
+    }
+    assert.ok(capCorners > 100, `${name}: found the cap (${capCorners} corners)`);
+
+    // The crown is a real arc and has to keep shading as one, against the exact
+    // normal of that solid of revolution: n ∝ (cos θ, sin θ, −f′(z)).
+    //
+    // Only on a slick tread, where the running surface is one unbroken patch.
+    // A window wall or a groove wall ends the patch, and a corner on that edge
+    // averages over the faces on one side of it only — a real effect of
+    // grouping, a couple of degrees wide, and not what this is pinning.
+    if (!plan.profile.crownDrop || cfg.tread !== 'slick') continue;
+    const surf = tireSurfaceAt(plan);
+    const { crownRadius } = plan.profile;
+    const halfW = plan.W / 2;
+    // Away from the caps: the patch ends there too.
+    const onCrown = (v) =>
+      pos.getZ(v) > 0.5 &&
+      pos.getZ(v) < plan.W - 0.5 &&
+      Math.abs(Math.hypot(pos.getX(v), pos.getY(v)) - surf(pos.getZ(v))) < 1e-4;
+    const errs = [];
+    for (let i = 0; i < idx.length; i += 3) {
+      const t = [idx[i], idx[i + 1], idx[i + 2]];
+      if (!t.every(onCrown)) continue;
+      for (const v of t) {
+        const x = pos.getX(v);
+        const y = pos.getY(v);
+        const z = pos.getZ(v);
+        const slope = -(z - halfW) / Math.sqrt(Math.max(1e-12, crownRadius ** 2 - (z - halfW) ** 2));
+        const k = Math.hypot(1, slope);
+        const r = Math.hypot(x, y);
+        const dot = (x / r / k) * nrm.getX(v) + (y / r / k) * nrm.getY(v) + (-slope / k) * nrm.getZ(v);
+        errs.push((Math.acos(Math.min(1, Math.max(-1, dot))) * 180) / Math.PI);
+      }
+    }
+    assert.ok(errs.length > 100, `${name}: found the crown (${errs.length} corners)`);
+    // Splitting the crown per strip instead of leaving it whole would land
+    // every corner on its own face's normal — half a strip out, which is 2.3°
+    // on this sampling and nowhere near 0.1°. The shoulder strip that closes
+    // the patch against the cap is the only thing in the tail.
+    const tight = errs.filter((e) => e < 0.1).length / errs.length;
+    assert.ok(tight > 0.9, `${name}: crown shades as one surface (${(100 * tight).toFixed(1)}% within 0.1°)`);
+    assert.ok(Math.max(...errs) < 3, `${name}: crown normal follows the arc (worst ${Math.max(...errs).toFixed(2)}°)`);
   }
 });
 

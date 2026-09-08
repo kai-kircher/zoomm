@@ -16,13 +16,14 @@
 export const IN = 25.4;
 
 // Web styles the planner knows how to lay out.
-const WEB_STYLES = ['solid', 'spokes', 'honeycomb', 'flexweb', 'lattice', 'auxetic', 'voronoi'];
+const WEB_STYLES = ['solid', 'spokes', 'honeycomb', 'flexweb', 'lattice', 'auxetic', 'graded', 'voronoi'];
 
 // Per-segment void budget for the chart-drawn webs. Every void is a boolean
 // tool downstream, so the count has to stay somewhere the kernel (and the
 // browser preview's triangulator) is comfortable.
 const WEB_CELL_CAP = 120;
 
+const TAU = Math.PI * 2;
 const d2r = (d) => (d * Math.PI) / 180;
 const r2d = (r) => (r * 180) / Math.PI;
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
@@ -34,12 +35,30 @@ const rnd = (v, p = 3) => {
   return Object.is(x, -0) ? 0 : x;
 };
 
+// Filaments the planner knows how to advise on.
+export const MATERIALS = ['pla', 'petg', 'abs', 'tpu'];
+
+// The wheel's radial bands, innermost first. A material change can only be
+// asked for at a boundary between two of them, because those boundaries are
+// the only cylinders that are solid all the way round whatever the web is
+// doing: every web pattern is laid out inside [rHub + 0.5, rRimIn - 0.5], and
+// no dovetail reaches either line either. See `zones` in planWheel.
+export const ZONE_KEYS = ['hub', 'web', 'tread'];
+
 export const DEFAULTS = Object.freeze({
   units: 'mm', // interpretation of the numeric length fields below
   diameter: 355.6, // 14in airless-cart-wheel demo default
   width: 50,
-  material: 'petg', // pla | petg | abs | tpu
-  infill: 'spokes', // solid | spokes | honeycomb | flexweb | lattice | auxetic | voronoi
+  material: 'petg', // pla | petg | abs | tpu — the whole wheel, unless:
+  materials: {
+    // Multi-material printing: which filament each radial band is made of.
+    // Empty follows `material`, so a single-material wheel is the default and
+    // is emitted exactly as it always was — one body per piece.
+    tread: '', // the tread and the rim ring under it
+    web: '', // the spokes / airless web
+    hub: '', // the hub ring around the bore
+  },
+  infill: 'spokes', // solid | spokes | honeycomb | flexweb | lattice | auxetic | graded | voronoi
   spokeCount: 0, // 0 = auto
   tread: 'lugged', // slick | ribbed | lugged | diamond | chevron | angled
   treadDepth: 3.5,
@@ -83,6 +102,15 @@ export const DEFAULTS = Object.freeze({
     waist: 0.45, // re-entrant pinch: waist width ÷ cell width
     cornerRadius: 1.2, // cell corner fillet; 0 = sharp
   },
+  graded: {
+    rings: 0, // cell rings across the web band; 0 = auto
+    cells: 0, // cells around the innermost ring, for a full turn; 0 = auto
+    wall: 2.6, // material left between neighbouring cells
+    cellShape: 'hex', // hex | rect | diamond
+    grade: 1, // 0 = every ring the same height, 1 = ring height ∝ radius
+    swirl: 0, // degrees the cells lean tangentially across the band
+    cornerRadius: 1.2, // cell corner fillet; 0 = sharp
+  },
   voronoi: {
     cells: 0, // cells per segment; 0 = auto
     wall: 3, // material left between neighbouring cells
@@ -118,6 +146,8 @@ export const LENGTH_FIELDS = [
   ['auxetic', 'cellSize'],
   ['auxetic', 'wall'],
   ['auxetic', 'cornerRadius'],
+  ['graded', 'wall'],
+  ['graded', 'cornerRadius'],
   ['voronoi', 'wall'],
   ['voronoi', 'cornerRadius'],
   ['printer', 'x'],
@@ -146,7 +176,9 @@ export function normalizeParams(input = {}) {
     honeycomb: { ...structuredClone(DEFAULTS.honeycomb), ...structuredClone(input.honeycomb || {}) },
     lattice: { ...structuredClone(DEFAULTS.lattice), ...structuredClone(input.lattice || {}) },
     auxetic: { ...structuredClone(DEFAULTS.auxetic), ...structuredClone(input.auxetic || {}) },
+    graded: { ...structuredClone(DEFAULTS.graded), ...structuredClone(input.graded || {}) },
     voronoi: { ...structuredClone(DEFAULTS.voronoi), ...structuredClone(input.voronoi || {}) },
+    materials: { ...structuredClone(DEFAULTS.materials), ...structuredClone(input.materials || {}) },
     profile: { ...structuredClone(DEFAULTS.profile), ...structuredClone(input.profile || {}) },
     printer: { ...structuredClone(DEFAULTS.printer), ...structuredClone(input.printer || {}) },
     joint: { ...structuredClone(DEFAULTS.joint), ...structuredClone(input.joint || {}) },
@@ -168,6 +200,10 @@ export function normalizeParams(input = {}) {
   p.lattice.struts = clamp(Math.round(Number(p.lattice.struts) || 0), 0, 96);
   p.auxetic.rings = clamp(Math.round(Number(p.auxetic.rings) || 0), 0, 6);
   p.auxetic.waist = clamp(Number(p.auxetic.waist) || DEFAULTS.auxetic.waist, 0.1, 0.9);
+  p.graded.rings = clamp(Math.round(Number(p.graded.rings) || 0), 0, 8);
+  p.graded.cells = clamp(Math.round(Number(p.graded.cells) || 0), 0, 240);
+  p.graded.grade = clamp(Number(p.graded.grade) || 0, 0, 1);
+  p.graded.swirl = clamp(Number(p.graded.swirl) || 0, -60, 60);
   p.voronoi.cells = clamp(Math.round(Number(p.voronoi.cells) || 0), 0, WEB_CELL_CAP);
   p.voronoi.seed = Math.abs(Math.round(Number(p.voronoi.seed) || 0)) % 100000;
 
@@ -188,7 +224,13 @@ export function normalizeParams(input = {}) {
   p.printer.z = clamp(p.printer.z, 20, 2000);
   p.printer.margin = clamp(p.printer.margin, 0, 60);
 
-  if (!['pla', 'petg', 'abs', 'tpu'].includes(p.material)) p.material = 'petg';
+  if (!MATERIALS.includes(p.material)) p.material = 'petg';
+  // A zone naming a filament we do not know follows the wheel's, which is also
+  // what an absent zone does — so a typo degrades to a single-material wheel
+  // rather than to one made of something the print guidance cannot describe.
+  for (const k of ZONE_KEYS) {
+    if (!MATERIALS.includes(p.materials[k])) p.materials[k] = '';
+  }
   if (!WEB_STYLES.includes(p.infill)) p.infill = 'spokes';
   if (!['slick', 'ribbed', 'lugged', 'diamond', 'chevron', 'angled'].includes(p.tread)) p.tread = 'lugged';
   if (!['flat', 'crowned', 'round'].includes(p.profile.shape)) p.profile.shape = 'flat';
@@ -204,6 +246,9 @@ export function normalizeParams(input = {}) {
   p.auxetic.cellSize = p.auxetic.cellSize > 0 ? clamp(p.auxetic.cellSize, 3, 250) : 0;
   p.auxetic.wall = clamp(p.auxetic.wall, 0.8, 25);
   p.auxetic.cornerRadius = Math.max(0, p.auxetic.cornerRadius);
+  if (!['hex', 'rect', 'diamond'].includes(p.graded.cellShape)) p.graded.cellShape = 'hex';
+  p.graded.wall = clamp(p.graded.wall, 0.8, 25);
+  p.graded.cornerRadius = Math.max(0, p.graded.cornerRadius);
   p.voronoi.wall = clamp(p.voronoi.wall, 0.8, 25);
   p.voronoi.cornerRadius = Math.max(0, p.voronoi.cornerRadius);
 
@@ -530,6 +575,76 @@ function mulberry32(seed) {
     t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
+}
+
+// ---------------------------------------------------------------------------
+// Materials
+// ---------------------------------------------------------------------------
+
+// Adhesive for a seam between two pieces of the same material — the joint the
+// dovetails make. A multi-material wheel has one of these per zone the seams
+// pass through, because each zone's segments only ever meet their own kind.
+const GLUES = {
+  tpu: {
+    name: 'Flexible contact adhesive (E6000 / Shoe Goo class)',
+    why: 'TPU flexes — rigid glue lines crack. A flexible adhesive moves with the joint.',
+    tips: 'Scuff mating faces, clean with IPA, thin bead in each dovetail pocket and on both faces, slide together, wipe squeeze-out, cure 24 h.',
+  },
+  pla: {
+    name: 'Flexible polyurethane construction adhesive (e.g., Loctite PL Premium class)',
+    why: 'A wheel sees shock and vibration; slightly flexible PU survives impacts that brittle CA lines will not. Use 2-part epoxy instead if you want maximum stiffness.',
+    tips: 'Thin bead in each dovetail pocket and along both faces, slide together, clamp lightly, wipe squeeze-out, cure 24 h.',
+  },
+  petg: {
+    name: 'Flexible polyurethane construction adhesive (e.g., Loctite PL Premium class)',
+    why: 'PETG bonds poorly with CA; PU grips it well and tolerates flex and vibration.',
+    tips: 'Scuff faces with 120-grit, clean with IPA, thin bead in pockets and faces, slide, wipe, cure 24 h.',
+  },
+  abs: {
+    name: 'Acetone solvent weld (or flexible PU where impact matters)',
+    why: 'Acetone welds ABS into a near-monolithic part — strongest option. PU stays flexible if the wheel takes hard impacts.',
+    tips: 'Brush acetone on both faces, slide together immediately, hold 60 s, full strength in 24 h.',
+  },
+};
+
+// How well two filaments weld to each other where two zones meet, printed
+// together on one machine. This matters more here than it does on most
+// multi-material parts: everything the tread does to the ground it does
+// *through* that cylinder, so a weak interface is a tread that peels.
+//
+// Keys are the pair sorted alphabetically.
+const BONDS = {
+  'petg|tpu': {
+    level: 'good',
+    why: 'This is the pairing to reach for when you want a soft tread on a rigid core.',
+  },
+  'pla|tpu': {
+    level: 'weak',
+    why: 'TPU grips PLA far more weakly than it grips PETG. Print the rigid zones in PETG instead, or expect the soft one to peel away under load.',
+  },
+  'petg|pla': {
+    level: 'weak',
+    why: 'PETG is what people put under PLA supports so the support comes away cleanly — which is exactly the property you do not want here. Use one of the two for both zones.',
+  },
+  'abs|pla': {
+    level: 'weak',
+    why: 'Neither sticks to the other, and they do not want the same chamber: ABS needs the heat that makes PLA sag.',
+  },
+  'abs|petg': {
+    level: 'weak',
+    why: 'Neither sticks to the other, and ABS wants a hot enclosure that PETG does not.',
+  },
+  'abs|tpu': {
+    level: 'weak',
+    why: 'TPU does not weld to ABS, and the two want different chamber temperatures.',
+  },
+};
+
+export function bondBetween(inner, outer) {
+  if (inner === outer) {
+    return { level: 'weld', why: 'One filament both sides: the interface is an ordinary layer bond, as strong as the part around it.' };
+  }
+  return BONDS[[inner, outer].sort().join('|')];
 }
 
 // ---------------------------------------------------------------------------
@@ -1014,6 +1129,24 @@ export function planWheel(input = {}) {
     return p.tread === 'chevron' ? barShift * (0.5 - Math.abs(u)) : barShift * u;
   };
 
+  // Where a full-turn tool's seam is parked, in degrees.
+  //
+  // Any tool built from a complete circle — the revolved tire below, and the
+  // cylinders that separate the material zones — carries a seam edge, and
+  // OpenCascade's boolean silently does *nothing* when that seam lies in the
+  // same plane as a planar face of the body. No error, no warning, the blank
+  // simply comes back untouched. Measured on a Ø355.6 crowned sector:
+  // 825 058.7 mm³ before the cut and 825 058.7 after, and 807 048.9 with the
+  // seam moved anywhere else at all.
+  //
+  // So it is parked where this piece has no radial face. A segmented wheel has
+  // two, at 0° and A°, and the roomiest spot is the far side of the wheel from
+  // them. A one-piece wheel has none except the walls of its tread windows, so
+  // the seam goes down the middle of a bar. (A *slanted* wall sweeps as it
+  // crosses the width and so can only ever touch the seam along a line, which
+  // is harmless — it is the coplanar case that bites.)
+  const toolSeam = rnd(mod(N > 1 ? (A + 360) / 2 : barCount ? barPhase(0) : 0, 360), 4);
+
   // -------------------------------------------------------------------------
   // Sections (canonical piece frame: sector spans [0°, A°])
   // -------------------------------------------------------------------------
@@ -1361,6 +1494,64 @@ export function planWheel(input = {}) {
     slotsTotal = Math.max(N, Math.round(slotsTotal / N) * N);
     const perSeg = slotsTotal / N;
     const sweep0 = clamp((0.85 * 360) / slotsTotal, 10, 35);
+    // rI0 and rO0 are the radii the finished *slot* spans, not where its
+    // centreline ends. The ±hw offset runs along the centreline arc's normal,
+    // and that normal is not tangential — the centreline is an arc, not a
+    // radial line — so each offset carries a radial component: an outer corner
+    // lands further out than the centreline's outer end, an inner corner
+    // further in than its inner end. Ending the centreline on rI0/rO0 pushed
+    // slots 2 mm past the web band, 1.6 mm of it into the rim. `slotAt` builds a
+    // slot from a trial pair of centreline end radii and reports where the
+    // corners actually fall, so the caller can solve for the pair that puts
+    // them on rI0/rO0. Everything the pattern is keyed to — the slot count,
+    // the sweep, hw — still comes off the nominal band, so only the ends move.
+    const slotAt = (aI, aO, aM, rIc, rOc, hw) => {
+      const I = polar(rIc, aI);
+      const O = polar(rOc, aO);
+      const cc = circumcircle(I, O, polar(rm, aM));
+      if (!cc) return null;
+      const off = (P, s) => [
+        cc.c[0] + ((P[0] - cc.c[0]) / cc.r) * (cc.r + s),
+        cc.c[1] + ((P[1] - cc.c[1]) / cc.r) * (cc.r + s),
+      ];
+      const Ip = off(I, hw);
+      const Im = off(I, -hw);
+      const Op = off(O, hw);
+      const Om = off(O, -hw);
+      const ccw = (I[0] - cc.c[0]) * (O[1] - cc.c[1]) - (I[1] - cc.c[1]) * (O[0] - cc.c[0]) > 0;
+      // Radial span of the finished loop. Corners alone do not give it: a cap
+      // is a chord, so its closest approach to the axis can fall mid-span, and
+      // a flank is an arc, so it reaches its own extremes where the line
+      // through cc.c and the axis crosses it. Both interiors are cheap and
+      // exact, and both bind — pinning only the corners left slots dipping a
+      // tenth of a millimetre past the radius they were meant to stop at.
+      let rIn = Infinity;
+      let rOut = -Infinity;
+      const hit = (x, y) => {
+        const r = Math.hypot(x, y);
+        if (r < rIn) rIn = r;
+        if (r > rOut) rOut = r;
+      };
+      for (const P of [Ip, Im, Op, Om]) hit(P[0], P[1]);
+      for (const [P, Q] of [[Im, Ip], [Op, Om]]) {
+        const dx = Q[0] - P[0];
+        const dy = Q[1] - P[1];
+        const t = -(P[0] * dx + P[1] * dy) / (dx * dx + dy * dy);
+        if (t > 0 && t < 1) hit(P[0] + dx * t, P[1] + dy * t);
+      }
+      const axis = Math.atan2(cc.c[1], cc.c[0]); // the axis, seen from cc.c
+      for (const [from, to, rad, dir] of [[Ip, Op, cc.r + hw, ccw], [Om, Im, cc.r - hw, !ccw]]) {
+        const a0 = Math.atan2(from[1] - cc.c[1], from[0] - cc.c[0]);
+        const a1 = Math.atan2(to[1] - cc.c[1], to[0] - cc.c[0]);
+        // Signed turn from a0, taken the way this arc runs.
+        const turn = (u) => (dir ? mod(u, TAU) : mod(u, TAU) - TAU);
+        const sweep = Math.abs(turn(a1 - a0));
+        for (const a of [axis, axis + Math.PI]) {
+          if (Math.abs(turn(a - a0)) < sweep) hit(cc.c[0] + rad * Math.cos(a), cc.c[1] + rad * Math.sin(a));
+        }
+      }
+      return { I, O, cc, Ip, Im, Op, Om, ccw, rIn, rOut };
+    };
     let placed = 0;
     for (let j = 0; j < perSeg; j++) {
       const mid = (j + 0.5) * (A / perSeg);
@@ -1370,30 +1561,40 @@ export function planWheel(input = {}) {
       for (let att = 0; att < 3 && !ok; att++) {
         const aI = mid - trySweep / 2;
         const aO = mid + trySweep / 2;
-        const I = polar(rI0, aI);
-        const O = polar(rO0, aO);
-        const M = polar(rm, mid + trySweep * 0.06);
-        const cc = circumcircle(I, O, M);
-        if (!cc) break;
+        const aM = mid + trySweep * 0.06;
+        // Pull the centreline ends in by what the offset costs radially. Each
+        // extreme tracks its own end near 1:1, so the residual collapses in a
+        // couple of passes; four leaves the slot a few microns inside the band.
+        let rIc = rI0;
+        let rOc = rO0;
+        let s = slotAt(aI, aO, aM, rIc, rOc, hw);
+        for (let pass = 0; pass < 4 && s; pass++) {
+          const dIn = rI0 - s.rIn;
+          const dOut = rO0 - s.rOut;
+          if (Math.abs(dIn) < 1e-9 && Math.abs(dOut) < 1e-9) break;
+          rIc += dIn;
+          rOc += dOut;
+          s = slotAt(aI, aO, aM, rIc, rOc, hw);
+        }
+        if (!s) break;
+        if (rOc - rIc < 2 * hw) {
+          // The correction ate the slot: no length left between the end caps.
+          trySweep *= 0.7;
+          if (att === 1) hw *= 0.7;
+          continue;
+        }
+        const { cc, I, O, Ip, Im, Op, Om, ccw: ccwDir } = s;
         // Slot angle grows monotonically with radius, so the angular extreme
         // at each face is the endpoint nearest it — check each at its own
         // radius with its own width padding.
-        const padI = r2d((hw + 1) / rI0);
-        const padO = r2d((hw + 1) / rO0);
-        if (N > 1 && (aI - padI < faceMarginAng(rI0) || aO + padO > A - faceMarginAng(rO0))) {
+        const padI = r2d((hw + 1) / rIc);
+        const padO = r2d((hw + 1) / rOc);
+        if (N > 1 && (aI - padI < faceMarginAng(rIc) || aO + padO > A - faceMarginAng(rOc))) {
           trySweep *= 0.7;
           if (att === 1) hw *= 0.7;
           continue;
         }
         ok = true;
-        const uI = [(I[0] - cc.c[0]) / cc.r, (I[1] - cc.c[1]) / cc.r];
-        const uO = [(O[0] - cc.c[0]) / cc.r, (O[1] - cc.c[1]) / cc.r];
-        const Ip = [cc.c[0] + uI[0] * (cc.r + hw), cc.c[1] + uI[1] * (cc.r + hw)];
-        const Im = [cc.c[0] + uI[0] * (cc.r - hw), cc.c[1] + uI[1] * (cc.r - hw)];
-        const Op = [cc.c[0] + uO[0] * (cc.r + hw), cc.c[1] + uO[1] * (cc.r + hw)];
-        const Om = [cc.c[0] + uO[0] * (cc.r - hw), cc.c[1] + uO[1] * (cc.r - hw)];
-        const cross = (I[0] - cc.c[0]) * (O[1] - cc.c[1]) - (I[1] - cc.c[1]) * (O[0] - cc.c[0]);
-        const ccwDir = cross > 0;
         // Interior probe: the centerline point midway along the slot.
         const midChord = [(I[0] + O[0]) / 2, (I[1] + O[1]) / 2];
         const mcLen = Math.hypot(midChord[0] - cc.c[0], midChord[1] - cc.c[1]) || 1;
@@ -1696,6 +1897,208 @@ export function planWheel(input = {}) {
       notes.push('Auxetic cells did not fit the web band clear of the seams; web left solid.');
       infillInfo = { style: 'solid' };
     }
+  } else if (infill === 'graded' && bandW > 14) {
+    // Graded rings — the regular airless-tire web: concentric rings of cells
+    // that grow with the radius, small around the hub and large at the rim.
+    // Every ring shares one angular pitch, so a cell is as wide as its own
+    // radius makes it; `grade` spaces the ring boundaries geometrically so
+    // the height grows with the width and each cell comes out a scaled copy
+    // of the one inside it. `cellShape` opens or closes the cell's waist —
+    // straight-sided rect, pointed diamond, or the hexagon in between — and
+    // `swirl` leans the whole stack tangentially for a turbine web.
+    //
+    // Walls hold by construction, the same two ways the auxetic's do. Ring
+    // boundaries are pitched a full `wall` apart radially, so two cells in
+    // different rings can never come closer than that. Within a ring the
+    // angular gap subtends a `wall` chord at the ring's *inner* radius, and
+    // two points at angular separation g with radii ≥ ρ are 2ρ·sin(g/2)
+    // apart at worst — so the tightest point on that wall is the one that was
+    // measured. Swirl is a shear of the chart: at any given t it moves every
+    // cell of a ring by the same amount, which leaves both gaps alone.
+    const gr = p.graded;
+    const ch = webChart(rWebIn, rWebOut, A, N, jointOutN + 2.5);
+    const wall = gr.wall + SAG_TOL;
+    // Ring boundaries in t. Linear spacing gives every ring the same height;
+    // geometric spacing (one ratio q per ring) makes each ring's height
+    // proportional to its radius. `grade` blends the two — both are strictly
+    // increasing in k, so every blend of them is too.
+    const ringBounds = (n) => {
+      const q = (rWebOut / rWebIn) ** (1 / n);
+      const out = [];
+      for (let k = 0; k <= n; k++) {
+        const lin = rWebIn + (bandW * k) / n;
+        const r = lin + (rWebIn * q ** k - lin) * gr.grade;
+        out.push((r - rWebIn) / bandW);
+      }
+      return out;
+    };
+    // Auto ring count. The band width sets the floor, the way it does for
+    // every other web: ~26 mm of band per ring keeps cells a sensible size on
+    // the wheel. Grading then asks for more, because each ring is a fixed
+    // factor larger than the last and a band that spans a big range of radii
+    // needs the extra rings to keep that step under ~1.4x — past which the
+    // cells grow too fast to read as one pattern.
+    const byBand = bandW / 26;
+    const byRatio = Math.log(rWebOut / rWebIn) / Math.log(1.4);
+    let rings = gr.rings > 0 ? gr.rings : clamp(Math.round(Math.max(byBand, byRatio * gr.grade)), 1, 6);
+    // The innermost ring is always the shallowest; drop rings until it has
+    // real height left once its two half-walls are taken off.
+    while (rings > 1 && (ringBounds(rings)[1] - ringBounds(rings)[0]) * bandW - wall < 4) rings--;
+    const bnds = ringBounds(rings);
+    const MAX_PITCH = 30; // deg — at least a dozen cells around any full ring
+    // Half-width at a cell's flat ends, as a fraction of its half-width at the
+    // waist: 1 keeps the sides straight, 0 pulls the ends to a point.
+    const endFrac = { hex: 0.55, rect: 1, diamond: 0 }[gr.cellShape];
+    let skipped = 0;
+    let narrowed = false;
+    let pitch = 0;
+    let widths = [];
+    const build = (grow) => {
+      skipped = 0;
+      narrowed = false;
+      widths = [];
+      // One pitch for the whole web, read off the ring in the middle of the
+      // band: cells come out square there, and everything inboard and
+      // outboard of it inherits the pitch and simply takes the width its own
+      // radius buys. (Reading it off the innermost ring instead makes the
+      // number hostage to the tightest, least representative ring on the
+      // wheel — and with uniform rings, absurd.)
+      const mid = Math.floor(rings / 2);
+      const t0 = bnds[mid] + wall / 2 / bandW;
+      const t1 = bnds[mid + 1] - wall / 2 / bandW;
+      const size = ((t1 - t0) * bandW * 1.15 + wall) * grow; // ≈ square cells there
+      let want = gr.cells > 0 ? (360 / gr.cells) * grow : 2 * ch.halfDeg(size, (t0 + t1) / 2);
+      narrowed = want > MAX_PITCH;
+      want = Math.min(want, MAX_PITCH);
+      if (!(want > 0.05)) return [];
+      pitch = want;
+      const out = [];
+      for (let j = 0; j < rings; j++) {
+        const tIn = bnds[j] + wall / 2 / bandW;
+        const tOut = bnds[j + 1] - wall / 2 / bandW;
+        const tc = (tIn + tOut) / 2;
+        // A ring runs from seam keep-out to seam keep-out, and the keep-out is
+        // an angle that shrinks as the radius grows — so the run a ring has to
+        // play with is its own, several times wider at the rim than at the
+        // hub. Each ring therefore takes the whole number of cells nearest the
+        // shared pitch and stretches to fill: the pattern still grows with the
+        // radius, but no ring leaves most of a cell's width standing solid
+        // beside the joint.
+        //
+        // Swirl leans each cell off radial by that many degrees — measured on
+        // the wheel, so the lean reads the same at every radius. Leaning about
+        // the ring's own mid radius holds a cell's excursion to half its
+        // height, and the run gives that excursion back at both ends, so a
+        // swirled ring simply carries fewer cells rather than losing them to
+        // the seam.
+        const exc = r2d((Math.abs(Math.tan(d2r(gr.swirl))) * (tOut - tIn) * bandW) / 2 / ch.rAt(tc));
+        const off = (t) => r2d((Math.tan(d2r(gr.swirl)) * (t - tc) * bandW) / ch.rAt(tc));
+        const seam = N === 1 ? 0 : ch.seamDeg(tIn);
+        const lo = seam + exc;
+        const run = N === 1 ? 360 : A - 2 * lo;
+        let cols = N === 1 ? Math.max(6, Math.round(run / want)) : Math.round(run / want);
+        if (cols >= 1 && run / cols > 1.35 * want) cols++; // one fat cell → two ordinary ones
+        if (cols < 1 || (tOut - tIn) * bandW < 3) {
+          skipped++;
+          continue;
+        }
+        const pit = run / cols;
+        const alpha = pit / 2 - ch.halfDeg(wall, tIn);
+        if (alpha <= 0.05) {
+          skipped++;
+          continue;
+        }
+        // Rings brick-stagger, so the radial walls of one ring sit over the
+        // middle of the cells in the next — the bond that makes the web read
+        // as a comb rather than a stack of grilles. A ring with a single cell
+        // has nothing to stagger against and would only lose it.
+        const stag = j % 2 === 1 && cols > 1;
+        const oLo = Math.min(off(tIn), off(tOut)) - alpha;
+        const oHi = Math.max(off(tIn), off(tOut)) + alpha;
+        const centres = [];
+        // A staggered ring on a segmented wheel carries one cell fewer: the
+        // half-cell the shift pushes over each seam cannot be cut, so the
+        // joint rib simply runs wider on those rings.
+        for (let i = 0; i < (stag && N > 1 ? cols - 1 : cols); i++) {
+          const thc = N === 1 ? (i + (stag ? 0.5 : 0)) * pit : lo + (stag ? i + 1 : i + 0.5) * pit;
+          if (N === 1 || (thc + oLo >= seam - 1e-9 && thc + oHi <= A - seam + 1e-9)) centres.push(thc);
+        }
+        if (!centres.length) {
+          skipped++;
+          continue;
+        }
+        // A cell narrower than a nozzle pass or two is noise, not a pattern.
+        const cellW = 2 * ch.rAt(tc) * Math.sin(d2r(alpha));
+        if (cellW < 3) {
+          skipped++;
+          continue;
+        }
+        if (!widths.length) pitch = pit; // the count reported is the innermost ring's
+        widths.push(cellW);
+        const aEnd = endFrac * alpha;
+        for (const thc of centres) {
+          const th = (t) => thc + off(t);
+          // Walked as one cycle: outer end, out to the waist, inner end, back.
+          // A rect has no waist to visit and a diamond has no end to flatten,
+          // so each drops the vertices it does not have rather than emitting
+          // one twice over.
+          const poly = [];
+          if (aEnd > 1e-6) poly.push([th(tOut) - aEnd, tOut], [th(tOut) + aEnd, tOut]);
+          else poly.push([th(tOut), tOut]);
+          if (aEnd < alpha - 1e-6) poly.push([th(tc) + alpha, tc]);
+          if (aEnd > 1e-6) poly.push([th(tIn) + aEnd, tIn], [th(tIn) - aEnd, tIn]);
+          else poly.push([th(tIn), tIn]);
+          if (aEnd < alpha - 1e-6) poly.push([th(tc) - alpha, tc]);
+          // Every corner is convex, so a fillet only ever hands material back.
+          const pts = filletLoop(chartPolyPoints(ch, poly), gr.cornerRadius);
+          const cut = loopCutter(`grd${out.length + 1}`, pts, ch.xy(th(tc), tc), zThrough);
+          if (cut) out.push(cut);
+        }
+      }
+      return out;
+    };
+    let grow = 1;
+    let cells = build(grow);
+    const overBudget = cells.length > WEB_CELL_CAP;
+    // Cell count runs as 1/pitch, so the factor that lands on the budget can
+    // be read straight off the overshoot instead of crept up on.
+    for (let attempt = 0; attempt < 8 && cells.length > WEB_CELL_CAP; attempt++) {
+      grow *= Math.max(1.3, (cells.length / WEB_CELL_CAP) * 1.05);
+      cells = build(grow);
+    }
+    if (cells.length) {
+      shared.push(...cells);
+      infillInfo = {
+        style: 'graded',
+        rings: rings - skipped,
+        cellsPerSegment: cells.length,
+        cellsPerTurn: Math.round(360 / pitch),
+        cellShape: gr.cellShape,
+        innerCell: rnd(widths[0], 1),
+        outerCell: rnd(widths[widths.length - 1], 1),
+        wall: rnd(gr.wall, 2),
+        grade: rnd(gr.grade, 2),
+        swirl: rnd(gr.swirl, 1),
+        cornerRadius: rnd(gr.cornerRadius, 2),
+      };
+      if (gr.rings > 0 && rings !== gr.rings) {
+        notes.push(`Graded rings reduced ${gr.rings} → ${rings} so the innermost ring keeps a printable cell height.`);
+      }
+      if (overBudget) {
+        notes.push(`Graded cells widened to ${rnd(widths[0], 1)} mm at the hub to stay inside the ${WEB_CELL_CAP}-void budget.`);
+      } else if (narrowed) {
+        notes.push(`Graded cells were capped at ${MAX_PITCH}° of arc — the width asked for would have taken too big a bite out of the wheel.`);
+      }
+      if (skipped) {
+        notes.push(`${skipped} graded ring${skipped === 1 ? '' : 's'} had no room for the pattern clear of the seams; left solid.`);
+      }
+      if (gr.wall < 1.2) {
+        notes.push(`Graded wall ${rnd(gr.wall, 2)} mm is under three 0.4 mm extrusions; expect a fragile web on a stock nozzle.`);
+      }
+    } else {
+      notes.push('Graded cells did not fit the web band clear of the seams; web left solid.');
+      infillInfo = { style: 'solid' };
+    }
   } else if (infill === 'voronoi' && bandW > 14) {
     // Organic web: a seeded Voronoi tessellation of the unrolled band, every
     // cell pulled back by half a wall so the material left between neighbours
@@ -1889,28 +2292,13 @@ export function planWheel(input = {}) {
     }
     const first = segs[0].a;
     const last = prev;
-    // Where the full revolution's seam falls, in degrees.
-    //
-    // A revolved solid's seam is a real edge of it, and OpenCascade's boolean
-    // silently does *nothing* when that seam lies in the same plane as a
-    // planar face of the body — no error, no warning, the blank simply comes
-    // back untouched. Measured on a Ø355.6 crowned sector: 825 058.7 mm³
-    // before the cut and 825 058.7 after, and 807 048.9 with the seam moved
-    // anywhere else at all.
-    //
-    // So it is parked where this piece has no radial face. A segmented wheel
-    // has two, at 0° and A°, and the roomiest spot is the far side of the
-    // wheel from them. A one-piece wheel has none except the walls of its
-    // tread windows, so the seam goes down the middle of a bar. (A *slanted*
-    // wall sweeps as it crosses the width and so can only ever touch the seam
-    // along a line, which is harmless — it is the coplanar case that bites.)
-    const seam = mod(N > 1 ? (A + 360) / 2 : barCount ? barPhase(0) : 0, 360);
     // Close the loop out past the rim and beyond both faces, so no face of the
-    // tool is ever coplanar with a face of the piece.
+    // tool is ever coplanar with a face of the piece. `toolSeam` (above) keeps
+    // the revolution's own seam edge out of the plane of any face it has.
     shared.push({
       id: 'tire',
       shape: 'revolve',
-      seam: rnd(seam, 4),
+      seam: toolSeam,
       segs: [
         { kind: 'line', a: rz(first[0], zLo), b: first },
         ...segs,
@@ -2050,41 +2438,163 @@ export function planWheel(input = {}) {
   const pieceFits = N === 1 ? wholeFits && W <= uz : fitsXY(bbox) && W <= uz;
 
   // -------------------------------------------------------------------------
+  // Material zones
+  // -------------------------------------------------------------------------
+  // A multi-material wheel is the same solid, cut into one body per filament
+  // by cylinders concentric with the axle. The two candidate cylinders are
+  // rHub and rRimIn — the walls of the web band — and they are the right ones
+  // for three reasons: they are solid all the way round whatever the web is
+  // (every pattern is laid out inside [rHub + 0.5, rRimIn - 0.5]), no dovetail
+  // reaches either of them, and they separate the three things a wheel is made
+  // of. rRimIn in particular keeps the whole rim ring with the tread, so a
+  // soft tread gets a sidewall and its own dovetails rather than a 3 mm skin —
+  // and the alternative line, the bar-window floor at R - treadEff, is a
+  // surface the piece profile already lies on, which is the one place a
+  // boolean must never be asked to cut.
+  //
+  // Neighbouring bodies share that cylinder exactly: no gap, no overlap, which
+  // is what a slicer wants from the parts of one multi-material object. The
+  // split itself happens in the kernel (`split_zones` in wheelwright_occ.py);
+  // all that is decided here is where the lines fall and what is on each side.
+  //
+  // Kept monotonic by construction rather than by assuming the bands come out
+  // in order: a wheel small enough that its hub ring runs into its rim band
+  // simply has no web band, and the two lines land on top of each other.
+  const zoneRim = clamp(rRimIn, 0, R);
+  const zoneEdge = clamp(rHub, 0, zoneRim);
+  const zoneBand = {
+    hub: [0, rnd(zoneEdge)],
+    web: [rnd(zoneEdge), rnd(zoneRim)],
+    // Past the running surface, so the outermost body is bounded by the wheel
+    // itself rather than by its own tool. Same clearance the tire tool takes.
+    tread: [rnd(zoneRim), rnd(R + 2)],
+  };
+  const zoneMat = Object.fromEntries(ZONE_KEYS.map((k) => [k, p.materials[k] || p.material]));
+
+  // A band too thin to print as its own body takes its inner neighbour's
+  // filament instead of becoming a two-perimeter sliver of a second one.
+  const MIN_ZONE_BAND = 3;
+  for (let i = 1; i < ZONE_KEYS.length; i++) {
+    const k = ZONE_KEYS[i];
+    const inner = ZONE_KEYS[i - 1];
+    const [r0, r1] = zoneBand[k];
+    if (r1 - r0 >= MIN_ZONE_BAND || zoneMat[k] === zoneMat[inner]) continue;
+    warnings.push(
+      (r1 - r0 < 1e-6
+        ? `This wheel has no ${k} band — the ${inner} ring runs straight into what is outside it — `
+        : `The ${k} band is ${rnd(r1 - r0, 1)} mm wide, too thin to print as its own material, `) +
+        `so it is ${zoneMat[inner].toUpperCase()} with the ${inner} rather than the ${zoneMat[k].toUpperCase()} you asked for.`
+    );
+    zoneMat[k] = zoneMat[inner];
+  }
+
+  // Bands are merged where neighbours share a filament, so "TPU tread, TPU
+  // web, PETG hub" is two bodies and not three — one file per thing you
+  // actually print, whatever combination of zones it spans.
+  const zones = [];
+  for (const key of ZONE_KEYS) {
+    const [r0, r1] = zoneBand[key];
+    if (r1 - r0 < 1e-6) continue; // no such band on this wheel
+    const last = zones[zones.length - 1];
+    if (last && last.material === zoneMat[key]) {
+      last.keys.push(key);
+      last.key = last.keys.join('-');
+      last.r1 = r1;
+      continue;
+    }
+    zones.push({ key, keys: [key], material: zoneMat[key], r0, r1, seam: toolSeam });
+  }
+  const multiMaterial = zones.length > 1;
+  const materialSet = [...new Set(zones.map((z) => z.material))];
+
+  // Every interface, and how well the two sides of it weld.
+  const interfaces = [];
+  for (let i = 1; i < zones.length; i++) {
+    const bond = bondBetween(zones[i - 1].material, zones[i].material);
+    interfaces.push({
+      r: zones[i].r0,
+      inner: zones[i - 1].material,
+      outer: zones[i].material,
+      ...bond,
+    });
+    if (bond.level === 'weak') {
+      warnings.push(
+        `${zones[i - 1].material.toUpperCase()} and ${zones[i].material.toUpperCase()} meet at ` +
+          `Ø${rnd(zones[i].r0 * 2, 1)} mm, and that interface is the wheel's weakest point: it carries ` +
+          `everything the tread does to the ground. ${bond.why}`
+      );
+    }
+  }
+
+  // A boundary is meant to be a complete annulus of solid material, and it is
+  // — every web pattern is laid out inside the band walls, no dovetail reaches
+  // them, and the tire tool stops at the rim ring. The one exception the
+  // planner cannot design away is a bolt circle asked for wider than the wheel
+  // has room for: on a wheel whose hub ring has already swallowed the web band
+  // the innermost boundary falls at the rim ring, and a wide bolt pattern
+  // reaches past it. The bodies still tile the piece exactly; what changes is
+  // that they meet on a ring with holes in it, and that the bolts clamp
+  // through two filaments. Both are worth knowing before the print, not after.
+  const hubFeatureR = Math.max(boreMaxR, b.type === 'bolt' ? boltR + boltHoleR : 0);
+  for (const z of zones.slice(1)) {
+    if (hubFeatureR <= z.r0 + 1e-9) continue;
+    warnings.push(
+      `The hub features reach Ø${rnd(hubFeatureR * 2, 1)} mm, past the ${z.key} material boundary at ` +
+        `Ø${rnd(z.r0 * 2, 1)} mm — the bolts pass through both filaments, and the two bodies ` +
+        `meet on a ring with holes in it rather than a solid one. Shrink the bolt circle, or give both zones ` +
+        `the same material.`
+    );
+  }
+
+  // Which filament each dovetail is cut in — a seam only ever joins a piece to
+  // its own kind, so a joint is made of whichever zone it sits in.
+  for (const j of joints) {
+    j.material = (zones.find((z) => j.r >= z.r0 && j.r < z.r1) || zones[0]).material;
+  }
+
+  // -------------------------------------------------------------------------
   // Recommendations
   // -------------------------------------------------------------------------
-  const glue = {
-    tpu: {
-      name: 'Flexible contact adhesive (E6000 / Shoe Goo class)',
-      why: 'TPU flexes — rigid glue lines crack. A flexible adhesive moves with the joint.',
-      tips: 'Scuff mating faces, clean with IPA, thin bead in each dovetail pocket and on both faces, slide together, wipe squeeze-out, cure 24 h.',
-    },
-    pla: {
-      name: 'Flexible polyurethane construction adhesive (e.g., Loctite PL Premium class)',
-      why: 'A wheel sees shock and vibration; slightly flexible PU survives impacts that brittle CA lines will not. Use 2-part epoxy instead if you want maximum stiffness.',
-      tips: 'Thin bead in each dovetail pocket and along both faces, slide together, clamp lightly, wipe squeeze-out, cure 24 h.',
-    },
-    petg: {
-      name: 'Flexible polyurethane construction adhesive (e.g., Loctite PL Premium class)',
-      why: 'PETG bonds poorly with CA; PU grips it well and tolerates flex and vibration.',
-      tips: 'Scuff faces with 120-grit, clean with IPA, thin bead in pockets and faces, slide, wipe, cure 24 h.',
-    },
-    abs: {
-      name: 'Acetone solvent weld (or flexible PU where impact matters)',
-      why: 'Acetone welds ABS into a near-monolithic part — strongest option. PU stays flexible if the wheel takes hard impacts.',
-      tips: 'Brush acetone on both faces, slide together immediately, hold 60 s, full strength in 24 h.',
-    },
-  }[p.material];
+  // The filament the wheel is "mostly" made of, for the advice that can only
+  // be given once. `material` is the wheel's own setting and the fallback for
+  // every zone that does not override it, so it is that unless all three zones
+  // were overridden away from it.
+  const baseMaterial = materialSet.includes(p.material) ? p.material : zones[0].material;
 
-  const printRec = {
-    orientation: 'Pieces are generated lying flat — print them exactly as exported.',
-    walls: p.material === 'tpu' ? 3 : 4,
-    infillPct: p.material === 'tpu' ? 18 : 30,
+  // Adhesive is for the seams, so it is chosen from what the seams are made
+  // of — not from what the wheel mostly is. A one-piece wheel has no seams and
+  // falls back to the wheel's own material so the panel still says something.
+  const seamMaterials = joints.length ? [...new Set(joints.map((j) => j.material))] : [baseMaterial];
+  const glue = {
+    ...GLUES[seamMaterials.includes('tpu') ? 'tpu' : seamMaterials.length === 1 ? seamMaterials[0] : 'petg'],
+  };
+  if (seamMaterials.length > 1) {
+    glue.why +=
+      ` This wheel's seams are not all the same material (${seamMaterials.map((m) => m.toUpperCase()).join(' + ')}); ` +
+      `that is the adhesive to use if you want one tube for the whole wheel, but each joint has its own below.`;
+    glue.perJoint = joints.map((j) => ({
+      tag: j.tag,
+      material: j.material,
+      name: GLUES[j.material].name,
+      tips: GLUES[j.material].tips,
+    }));
+  }
+
+  const printFor = (m) => ({
+    material: m,
+    walls: m === 'tpu' ? 3 : 4,
+    infillPct: m === 'tpu' ? 18 : 30,
     infillPattern: 'gyroid',
     note:
-      p.material === 'tpu'
+      m === 'tpu'
         ? `TPU 95A, slow (~25 mm/s), no part cooling for first layers. The modeled ${['flexweb', 'lattice', 'auxetic'].includes(infillInfo.style) ? `${infillInfo.style} web does the springing` : 'web carries the load'} — slicer infill just fills walls.`
         : 'The structural pattern is modeled in the part; slicer infill only fills the solid ribs.',
+  });
+  const printRec = {
+    orientation: 'Pieces are generated lying flat — print them exactly as exported.',
+    ...printFor(baseMaterial),
   };
+  if (materialSet.length > 1) printRec.byMaterial = materialSet.map(printFor);
 
   return {
     params: p,
@@ -2103,6 +2613,13 @@ export function planWheel(input = {}) {
     N,
     segAngle: rnd(A, 4),
     solidDisk,
+    // One entry per body a piece is printed as, innermost first. A
+    // single-material wheel has exactly one, and nothing downstream splits it.
+    zones,
+    multiMaterial,
+    materials: zoneMat,
+    materialSet,
+    interfaces,
     joints,
     jointClearance: jc,
     profile: {

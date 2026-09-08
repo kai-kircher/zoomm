@@ -101,6 +101,7 @@ Everything replans live (120 ms debounce) — there is no "generate" button.
 | **Bolt-on caster** | Bolts to a plate or caster fork | Ø160 × 45, PETG, honeycomb, 4-bolt hub |
 | **Interlaced airless** | The criss-cross airless-tire look | Ø260 × 55, TPU, 3-row lattice |
 | **Auxetic scooter** | Re-entrant lattice, negative Poisson's ratio | Ø200 × 40, TPU, 2 rings, waist 0.4 |
+| **Graded-ring airless** | Rings of cells growing outward — the moulded-airless look | Ø200 × 45, PETG, 3 rings, 5-bolt hub |
 | **Voronoi show wheel** | Organic cell web, display piece | Ø180 × 40, PETG, voronoi seed 7 |
 | **100 mm test** | Small, fast print for checking joints/fit | Ø100 × 25, PLA, plain 8 mm bore |
 
@@ -122,12 +123,14 @@ on the number you typed rather than 2.59999.
 | Diameter | 30 – 1500 mm | The outer diameter including tread. |
 | Width | 6 – 400 mm | Axial width; must fit printer Z. |
 | Material | PLA / PETG / ABS-ASA / TPU | Drives the adhesive recommendation and print settings, not the geometry. |
+| Multi-material (per zone) | off / on | Replaces the one material select with three — tread, web, hub. See [§8.1](#81-printing-a-wheel-in-more-than-one-filament). |
+| Tread + rim / Web + spokes / Hub | PLA / PETG / ABS-ASA / TPU | One filament per radial band. The preview colours the bands, and each piece exports as one file per filament. |
 
 ### Structure
 
 | Control | Notes |
 | --- | --- |
-| Web style | `spokes`, `solid`, `honeycomb`, `flexweb`, `lattice`, `auxetic`, `voronoi` — see [§5](#5-choosing-a-web). |
+| Web style | `spokes`, `solid`, `honeycomb`, `flexweb`, `lattice`, `auxetic`, `graded`, `voronoi` — see [§5](#5-choosing-a-web). |
 | *(per-style group)* | Each style reveals its own parameters; every length follows the units selector. Full tables in the [README](../README.md#the-airless-webs). |
 | Tread | `lugged` (straight bars), `angled`, `chevron` (V-bar), `ribbed` (circumferential grooves), `diamond` (bars + grooves), `slick`. |
 | Tread depth | 0.8 mm – 6 % of diameter. Ignored for slick. |
@@ -234,6 +237,7 @@ planner made for you.
 | Springy airless wheel, simple | `flexweb` | Curved flex slots — long, compliant ribs. |
 | Springy airless wheel, structural | `lattice` | Crossing strut families; 1 row gives a chevron truss. |
 | Compliance that pulls inward under load | `auxetic` | Re-entrant cells, negative Poisson's ratio. |
+| The moulded airless-tire look | `graded` | Rings of cells that grow with the radius: small at the hub, large at the rim. Hex, rectangular or diamond cells, leanable into a turbine web. |
 | A show piece | `voronoi` | Organic irregular cells, reproducible from a seed. |
 
 Notes that apply to all of them:
@@ -276,10 +280,10 @@ The wheel's **width** is never split — it must fit printer Z.
 
 | File | Contents |
 | --- | --- |
-| `piece-A.py`, `piece-B.py`, … | One file per **unique** piece: its boundary and the prisms to subtract. Print-flat on XY. |
+| `piece-A.py`, `piece-B.py`, … | One file per **unique** piece: its boundary and the prisms to subtract. Print-flat on XY. A multi-material piece also declares its `ZONES` and writes one solid per filament — `piece-A-tread-tpu.stl` and so on. |
 | `wheelwright_occ.py`, `build.py` | The geometry code itself, shipped verbatim. `python build.py .` turns the pieces into STL and STEP; `--formats stl` or `--formats step` for one of them. |
-| `ASSEMBLY.md` | Print quantities and footprints, print settings, the glue-up sequence for your material, the build commands, and any warnings. |
-| `wheelwright.json` | Machine-readable manifest: the full parameter set, segment count, piece list with quantities, footprint, warnings and notes. |
+| `ASSEMBLY.md` | Print quantities and footprints, print settings, the glue-up sequence for your material, the build commands, and any warnings. Multi-material wheels get a filament table, the slicer steps, and what the extra filament changes cost. |
+| `wheelwright.json` | Machine-readable manifest: the full parameter set, segment count, piece list with quantities and the file each body is written to, footprint, warnings and notes. |
 
 Every piece file opens with a comment header naming the wheel, the piece, and
 how many of it to print — the file is self-describing if it gets separated from
@@ -313,6 +317,72 @@ Glue-up:
 5. Bolt hubs: snug the bolts in a star pattern; they clamp the stack axially.
 6. Shaft hubs: axial retention is the adhesive plus your collars/washers — the
    dovetails resist circumferential separation, not axial pull.
+
+### 8.1 Printing a wheel in more than one filament
+
+Tick **Multi-material (per zone)** in the sidebar and the one material select
+becomes three: tread + rim, web / spokes, hub. They start on whatever the wheel
+already was, so ticking the box on its own changes nothing — change one and the
+preview recolours to show what is made of what.
+
+The wheel is cut into bodies at the two cylinders that separate its bands: the
+outside of the hub ring, and the inside of the rim ring. Those are the only two
+places two filaments can meet on a face that is solid all the way round, which
+is why they are the choice on offer. Bands that name the same filament are
+merged, so *TPU tread, PETG web, PETG hub* comes out as **two** bodies, not
+three.
+
+**What you get.** Each piece exports as one file per filament, named for both:
+
+```
+piece-A-hub-web-petg.stl     piece-A-tread-tpu.stl
+piece-A-hub-web-petg.step    piece-A-tread-tpu.step
+```
+
+They are in the same coordinate frame and they touch exactly — no gap, no
+overlap.
+
+**Getting it into a slicer.** Select the files belonging to **one** piece and
+import them together. PrusaSlicer, OrcaSlicer and Bambu Studio all ask whether
+to load several files as a single object with multiple parts — say yes. (If
+they do not ask: load one, then right-click it → *Add part* → *Load…* for the
+rest.) Then give each part its filament. Do not move the parts; they are
+already positioned. Repeat per piece — each piece is its own object and carries
+its own complete set of bodies.
+
+**Three things worth knowing before you start the print.**
+
+1. **Pick filaments that stick to each other.** The interface is a plain
+   cylinder and it carries the load in shear — everything the tread does to the
+   ground goes through it — so it is exactly as strong as the weld between the
+   two filaments. PETG + TPU is the pairing to reach for. PLA + TPU, PLA +
+   PETG, and anything + ABS are all weak, and the app warns about them where
+   the two meet.
+
+   | Pairing | Verdict |
+   | --- | --- |
+   | Same filament | Welds — an ordinary layer bond |
+   | PETG + TPU | Bonds well |
+   | PLA + TPU | Weak — TPU grips PETG far better |
+   | PLA + PETG | Weak — they are used as each other's release layer |
+   | ABS + anything else | Weak, and they want different chamber temperatures |
+
+2. **One nozzle means a lot of purge.** The bodies are rings and the piece
+   prints lying flat, so every layer crosses every one of them. An AMS or MMU
+   therefore swaps filament at least once per layer — about 250 swaps on a
+   50 mm wide wheel — and purges each time; the purge can outweigh the wheel.
+   A printer with independent tool heads pays almost nothing for the same
+   swaps. `ASSEMBLY.md` gives the number for your wheel.
+
+3. **Each seam is its own glue-up.** A dovetail only ever joins a piece to its
+   own kind, so a TPU-tread wheel glues its rim joints with flexible contact
+   adhesive and its hub joints with PU. The panel and `ASSEMBLY.md` list the
+   adhesive per joint rather than one for the wheel.
+
+If a band is too thin to print as its own body — a small wheel whose hub ring
+runs into its rim band has no web band at all — the planner says so and gives
+that band its neighbour's filament rather than laying down a two-perimeter
+sliver of a second one.
 
 ---
 
@@ -358,7 +428,25 @@ nearly a plain hex (stiffer). Watch the note about walls under three extrusion
 widths — a 2 mm wall in TPU on a 0.4 nozzle is fragile in exactly the place the
 wheel flexes most.
 
-### 9.5 Replacement wheel for a machine you own
+### 9.5 Cart wheel with the moulded-airless look
+
+*Preset: Graded-ring airless.* Ø200 × 45, PETG, 3 rings, 5 bolts on Ø80 BCD.
+
+`graded` is the web to reach for when you want the pattern most airless tires
+and robot wheels actually carry: rings of cells, small around the hub and
+growing as the radius does. `grade` is the knob for how much they grow — `1`
+grows them in both directions at once, `0` keeps every ring the same height and
+only widens the cells across. `rings` and `cells` set how fine the pattern is;
+`cellShape` swaps the hexagons for straight-sided cells or for diamonds, which
+leave a triangulated truss between them. `swirl` leans the whole web off radial
+for a turbine look — 20–30° reads clearly without costing many cells.
+
+A wheel with a small hub and a big rim grades hard: the rim cells can end up
+several times the size of the hub ones, and the innermost ring may grade down
+to cells too small to cut, which the build notes will say. Raise `rings`, raise
+`cells`, or pull `grade` back if you want it gentler.
+
+### 9.6 Replacement wheel for a machine you own
 
 Measure three things: the shaft (diameter, and key or flat if it has one), the
 wheel's outer diameter, and its width. Type them in, pick the hub type that
@@ -366,12 +454,35 @@ matches the shaft, set your bed, and check `fits printer`. Set bore clearance
 from experience with your printer (0.2 mm is a good first guess; 0.1 for a
 tight sliding fit on a well-tuned machine).
 
-### 9.6 A wheel bigger than your printer, on purpose
+### 9.7 A wheel bigger than your printer, on purpose
 
 Set diameter 700 mm and a 220 bed. You'll get the `even 16 segments do not fit`
 warning: the depth of a pie slice is ~R regardless of N. The honest options are
 a smaller wheel, a bigger printer, or waiting for the two-ring split on the
 roadmap. Wheelwright says so rather than emitting parts that can't be printed.
+
+### 9.7 A rubber tread on a rigid wheel
+
+*Preset: TPU tread, rigid core.* Ø200 × 40 mm, honeycomb web, 4-bolt hub, with
+the tread in TPU and everything inside it in PETG.
+
+It prints in one piece at that size, so there are no seams and no glue — but
+two bodies: `piece-A-hub-web-petg` and `piece-A-tread-tpu`, meeting on the
+Ø182 mm cylinder that is the inside of the rim ring. The TPU gets the whole rim
+ring with it, so the soft part is a 9 mm tyre with a sidewall rather than a
+3 mm skin over the bars. PETG and TPU weld well, which is the reason to use PETG
+here rather than PLA for the core.
+
+Load both files together as one object with two parts, assign the filaments,
+and budget the purge: 40 mm of height at 0.2 mm is about 200 layers, and a
+single-nozzle machine changes filament on every one of them. On a tool changer
+it costs nothing at all.
+
+Want the same wheel without a multi-material printer? Untick the box, print it
+in PETG, and glue a strip of something grippy round it — the geometry is
+unchanged. Printing the two bodies separately and pressing them together is
+*not* supported yet: they share their boundary exactly, with no fit clearance
+and nothing to key them against rotation.
 
 ---
 
@@ -387,6 +498,8 @@ roadmap. Wheelwright says so rather than emitting parts that can't be printed.
 | `2D fallback` in the corner of the viewport | WebGL unavailable (remote desktop, blocked GPU) | Nothing breaks — the same plan renders in 2D. Use a local browser for 3D. |
 | Port 3000 in use | Another dev server | `PORT=4000 npm start`. |
 | Numbers look 25.4× wrong | Units selector changed without the form | Can't happen through the UI — but if you POST to the API directly, send `units: "in"` **with** inch values, or convert to mm yourself. |
+| A material you picked is missing from the export | Its band was too thin to print as its own body, or two neighbouring bands share a filament and were merged | The plan says which, in the warnings. A wheel small enough that its hub ring meets its rim band has no web to give a third filament to. |
+| The bodies of one piece land as separate objects in the slicer | They were imported one at a time | Select all of a piece's files and open them together; the slicer then offers to load them as a single object with multiple parts. |
 
 ---
 
@@ -408,6 +521,13 @@ On a wheel with a *slanted* tread the preview reads 1–3 % light, because it
 also samples each profile as a polyline and rules between them where the kernel
 lofts the exact outlines. Everywhere else it now agrees with the built solid to
 better than 0.1 %. Weigh the STL, not the preview.
+
+**Can I print the tread separately and push it on?**
+Not as designed. The bodies of a multi-material piece share their boundary
+exactly — no clearance, and nothing keying them against rotation — because that
+is what a printer laying both filaments down in the same layer needs. Pressing
+a separately printed tread onto a core needs a fit clearance and an interlock,
+and neither is in yet. Printing them together is the supported path.
 
 **Will the pieces really slide together?**
 The dovetail pockets are the tenon geometry plus your clearance per side, and

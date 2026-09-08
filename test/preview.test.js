@@ -18,6 +18,7 @@ import {
   buildLoftGeometry,
   buildPrismGeometry,
   offAxisAngle,
+  groupByZone,
 } from '../public/preview.js';
 
 // Records the traced profile as a point list (arcs sampled).
@@ -176,6 +177,10 @@ const WEB_VARIANTS = [
   ['lattice, sharp corners', { infill: 'lattice', lattice: { rows: 4, cornerRadius: 0 } }],
   ['auxetic, default rings', { infill: 'auxetic' }],
   ['auxetic, deep waist', { infill: 'auxetic', auxetic: { rings: 4, waist: 0.2 } }],
+  ['graded, default rings', { infill: 'graded' }],
+  ['graded, uniform rings', { infill: 'graded', graded: { grade: 0 } }],
+  ['graded, rect cells', { infill: 'graded', graded: { cellShape: 'rect', cornerRadius: 0 } }],
+  ['graded, swirled diamonds', { infill: 'graded', graded: { cellShape: 'diamond', swirl: 30 } }],
   ['voronoi, default seed', { infill: 'voronoi' }],
   ['voronoi, dense', { infill: 'voronoi', voronoi: { cells: 40, seed: 12 } }],
 ];
@@ -297,29 +302,39 @@ test('a crowned piece previews as a crowned mesh, not a cylinder', () => {
 // the wrong way, a triangulation borrowed from the wrong end. Every interior
 // edge belonging to exactly two faces catches all three.
 //
-// The tally has to weld by position before it counts, because two vertices can
-// stand in the same place: a crown deep enough to eat a tread window brings
-// that window's two wall points together, and the cap fans a zero-area
-// triangle back in over every such collapse on purpose. Counting raw indices
-// would let a real tear hide behind one of those pairs — the two halves of a
-// split edge read as one edge with two faces. So vertices are welded on exact
-// position, and the triangles that go degenerate under the weld are skipped:
-// those are the fans, and they bound nothing. Indexed or not, both preview
-// paths answer to the same count.
+// Edges are counted between *positions*, not vertex indices: the mesh splits a
+// vertex once per surface meeting on it, so the shading can keep the piece's
+// edges hard (see creasedNormals) and one physical corner is several indices.
+// The split copies a position verbatim, so exact equality is the right weld —
+// rounding here would instead merge the collapsed bar windows, which sit as
+// close as 1e-6 mm apart and are deliberately kept distinct.
+const weldByPosition = (pos) => {
+  const seen = new Map();
+  const of = new Uint32Array(pos.count);
+  for (let i = 0; i < pos.count; i++) {
+    const k = `${pos.getX(i)},${pos.getY(i)},${pos.getZ(i)}`;
+    if (!seen.has(k)) seen.set(k, seen.size);
+    of[i] = seen.get(k);
+  }
+  return of;
+};
+
+// Every edge of a closed shell belongs to exactly two faces. Counting raw
+// indices would let a real tear hide behind a coincident pair — the two halves
+// of a split edge read as one edge with two faces — so the count is taken on
+// welded vertices. The triangles that go degenerate under the weld are
+// skipped: those are the zero-area fans the cap adds over a collapsed bar
+// window, to give the side strips' repeated points a second face. Welded,
+// their two copies of the surviving edge cancel, so they neither close nor
+// open anything. Indexed or not, both preview paths answer to this count.
 function openEdges(geo) {
   const pos = geo.getAttribute('position');
   const idx = geo.getIndex() ? geo.getIndex().array : [...Array(pos.count).keys()];
-  const welded = new Map();
-  const weld = [];
-  for (let i = 0; i < pos.count; i++) {
-    const at = `${pos.getX(i)},${pos.getY(i)},${pos.getZ(i)}`;
-    if (!welded.has(at)) welded.set(at, welded.size);
-    weld.push(welded.get(at));
-  }
+  const weld = weldByPosition(pos);
   const edges = new Map();
   for (let i = 0; i < idx.length; i += 3) {
     const t = [weld[idx[i]], weld[idx[i + 1]], weld[idx[i + 2]]];
-    if (new Set(t).size < 3) continue; // a fan back in over a collapsed window
+    if (new Set(t).size < 3) continue;
     for (let k = 0; k < 3; k++) {
       const a = t[k];
       const b = t[(k + 1) % 3];
@@ -353,11 +368,12 @@ test('lofted preview meshes are watertight and face outwards', () => {
     const pos = geo.getAttribute('position');
     const idx = geo.getIndex().array;
     for (let i = 0; i < idx.length; i += 3) {
-      assert.equal(new Set([idx[i], idx[i + 1], idx[i + 2]]).size, 3, `${name}: no repeated vertex in a triangle`);
+      assert.equal(new Set([idx[i], idx[i + 1], idx[i + 2]]).size, 3, `${name}: no triangle repeats a vertex`);
     }
     assert.equal(openEdges(geo), 0, `${name}: every edge shared by two faces`);
-    // Normals on the tread band must point away from the axis.
-    geo.computeVertexNormals();
+    // Normals on the tread band must point away from the axis. These are the
+    // normals the mesh ships with, not a recomputed set — they are the thing
+    // the renderer actually shades by.
     const nrm = geo.getAttribute('normal');
     let outward = 0;
     for (let i = 0; i < pos.count; i++) {
@@ -377,8 +393,8 @@ test('lofted preview meshes are watertight and face outwards', () => {
 // ExtrudeGeometry triangulates its own caps — so the frame fix reaches it only
 // by turning the profile on the way in and turning the geometry back on the
 // way out, and the slivers the planner's rounding leaves behind have to be
-// welded off the profile before earcut ever sees them. Every one of the 84
-// pieces below was torn before that, 2960 open edges between them: lattice for
+// welded off the profile before earcut ever sees them. Every one of the 96
+// pieces below was torn before that, 3236 open edges between them: lattice for
 // the horizontal-bridge reason the lofted test pins, and every style including
 // solid for three slivers a cap. Take either half out and the other half's
 // cases still fail, which is what says both are load-bearing.
@@ -389,7 +405,7 @@ test('lofted preview meshes are watertight and face outwards', () => {
 // and no triangulator answers for a polygon that crosses itself — that is a
 // planner defect, and it is torn on the raw extrusion too.
 test('extruded preview meshes are watertight, every web style', () => {
-  const WEBS = ['solid', 'spokes', 'honeycomb', 'flexweb', 'lattice', 'auxetic', 'voronoi'];
+  const WEBS = ['solid', 'spokes', 'honeycomb', 'flexweb', 'lattice', 'auxetic', 'graded', 'voronoi'];
   const CASES = [];
   for (const infill of WEBS) for (const type of ['keyed', 'plain', 'hex', 'dbore', 'bolt']) CASES.push([infill, type, undefined]);
   // One and two pieces trace a different outline kind altogether — a whole
@@ -461,6 +477,97 @@ test('the triangulation frame leaves no edge horizontal', () => {
   assert.ok(closest > 1e-3, `no edge lands on the horizontal (closest ${closest.toExponential(2)} rad)`);
 });
 
+// The shaped mesh is indexed, so a rim vertex sits on the end cap and on the
+// side wall at once and a void's corner sits on both walls meeting there.
+// Averaging a vertex over all of them — which is all `computeVertexNormals`
+// can do — rounds the shading off every hard edge the piece has: pockets read
+// as funnels, and each cap picks up a fan of streaks off its own rim, because
+// earcut's long thin triangles carry the tilted rim normals a long way inward.
+// It showed up first on crowned wheels, only because a flat slick tread never
+// takes this path at all.
+//
+// The two halves of the property pull against each other, so both are pinned:
+// hard where the piece has an edge, smooth where it has a curve.
+test('shaped meshes shade hard at edges and smooth along the crown', () => {
+  const CASES = [
+    ['crowned + bars', { tread: 'lugged', profile: { shape: 'crowned', crownDrop: 5 } }],
+    ['flat + grooves', { tread: 'ribbed', infill: 'honeycomb' }],
+    ['angled bars, flat', { tread: 'angled', treadAngle: 30 }],
+    ['crowned slick', { tread: 'slick', profile: { shape: 'crowned', crownDrop: 5 } }],
+    ['round section', { diameter: 200, width: 28, tread: 'slick', infill: 'solid', profile: { shape: 'round' }, bore: { type: 'plain', diameter: 12 } }],
+  ];
+  for (const [name, cfg] of CASES) {
+    const plan = planWheel(cfg);
+    const geo = buildLoftGeometry(THREE, plan, plan.uniquePieces[0]);
+    const pos = geo.getAttribute('position');
+    const nrm = geo.getAttribute('normal');
+    const idx = geo.getIndex().array;
+
+    // The far cap is exactly the +Z plane, so any tilt in a corner it shades
+    // with is shading error and nothing else. Only triangles with real area
+    // count: the bore fold and the collapsed windows leave slivers that draw
+    // nothing, and their direction is noise by construction.
+    let capCorners = 0;
+    for (let i = 0; i < idx.length; i += 3) {
+      const t = [idx[i], idx[i + 1], idx[i + 2]];
+      if (!t.every((v) => Math.abs(pos.getZ(v) - plan.W) < 1e-9)) continue;
+      const [a, b, c] = t.map((v) => [pos.getX(v), pos.getY(v)]);
+      const area = Math.abs((b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1])) / 2;
+      if (area < 1e-4) continue;
+      for (const v of t) {
+        capCorners++;
+        // A round section meets its own side face tangentially, so there the
+        // crown really does carry on into the cap and a couple of degrees of
+        // tilt is the surface, not a smear.
+        const tol = plan.profile.crownDrop >= plan.W / 2 - 1e-9 ? 3 : 0.01;
+        const tilt = (Math.acos(Math.min(1, Math.max(-1, nrm.getZ(v)))) * 180) / Math.PI;
+        assert.ok(tilt < tol, `${name}: cap corner shades +Z (off by ${tilt.toFixed(1)}°)`);
+      }
+    }
+    assert.ok(capCorners > 100, `${name}: found the cap (${capCorners} corners)`);
+
+    // The crown is a real arc and has to keep shading as one, against the exact
+    // normal of that solid of revolution: n ∝ (cos θ, sin θ, −f′(z)).
+    //
+    // Only on a slick tread, where the running surface is one unbroken patch.
+    // A window wall or a groove wall ends the patch, and a corner on that edge
+    // averages over the faces on one side of it only — a real effect of
+    // grouping, a couple of degrees wide, and not what this is pinning.
+    if (!plan.profile.crownDrop || cfg.tread !== 'slick') continue;
+    const surf = tireSurfaceAt(plan);
+    const { crownRadius } = plan.profile;
+    const halfW = plan.W / 2;
+    // Away from the caps: the patch ends there too.
+    const onCrown = (v) =>
+      pos.getZ(v) > 0.5 &&
+      pos.getZ(v) < plan.W - 0.5 &&
+      Math.abs(Math.hypot(pos.getX(v), pos.getY(v)) - surf(pos.getZ(v))) < 1e-4;
+    const errs = [];
+    for (let i = 0; i < idx.length; i += 3) {
+      const t = [idx[i], idx[i + 1], idx[i + 2]];
+      if (!t.every(onCrown)) continue;
+      for (const v of t) {
+        const x = pos.getX(v);
+        const y = pos.getY(v);
+        const z = pos.getZ(v);
+        const slope = -(z - halfW) / Math.sqrt(Math.max(1e-12, crownRadius ** 2 - (z - halfW) ** 2));
+        const k = Math.hypot(1, slope);
+        const r = Math.hypot(x, y);
+        const dot = (x / r / k) * nrm.getX(v) + (y / r / k) * nrm.getY(v) + (-slope / k) * nrm.getZ(v);
+        errs.push((Math.acos(Math.min(1, Math.max(-1, dot))) * 180) / Math.PI);
+      }
+    }
+    assert.ok(errs.length > 100, `${name}: found the crown (${errs.length} corners)`);
+    // Splitting the crown per strip instead of leaving it whole would land
+    // every corner on its own face's normal — half a strip out, which is 2.3°
+    // on this sampling and nowhere near 0.1°. The shoulder strip that closes
+    // the patch against the cap is the only thing in the tail.
+    const tight = errs.filter((e) => e < 0.1).length / errs.length;
+    assert.ok(tight > 0.9, `${name}: crown shades as one surface (${(100 * tight).toFixed(1)}% within 0.1°)`);
+    assert.ok(Math.max(...errs) < 3, `${name}: crown normal follows the arc (worst ${Math.max(...errs).toFixed(2)}°)`);
+  }
+});
+
 test('a flat piece needs no loft and every section stays congruent', () => {
   const flat = planWheel({ tread: 'lugged' });
   assert.equal(flat.sections.length, 1);
@@ -500,7 +607,7 @@ test('every shaped piece encloses the solid its extrusion does — voids stay vo
     ['angled', (base) => [{ ...base, tread: 'angled', treadCount: 48, treadAngle: 0 }, { ...base, tread: 'angled', treadCount: 48, treadAngle: 30 }]],
     ['chevron', (base) => [{ ...base, tread: 'chevron', treadCount: 48, treadAngle: 0 }, { ...base, tread: 'chevron', treadCount: 48, treadAngle: 30 }]],
   ];
-  for (const infill of ['solid', 'spokes', 'honeycomb', 'flexweb', 'lattice', 'auxetic', 'voronoi']) {
+  for (const infill of ['solid', 'spokes', 'honeycomb', 'flexweb', 'lattice', 'auxetic', 'graded', 'voronoi']) {
     for (const type of ['keyed', 'plain', 'hex', 'dbore', 'bolt']) {
       for (const [via, pair] of CASES) {
         const [flatCfg, loftCfg] = pair({ infill, bore: { type } });
@@ -526,4 +633,126 @@ test('every shaped piece encloses the solid its extrusion does — voids stay vo
       }
     }
   }
+});
+
+// ---------------------------------------------------------------------------
+// Material zones
+// ---------------------------------------------------------------------------
+// A multi-material piece is one solid cut into bodies at cylinders concentric
+// with the axle, and the preview has to show *those* bodies. Assigning whole
+// triangles by centroid would be cheaper and would put the colour boundary
+// tens of millimetres out, because a cap triangle out of the ear-clipper can
+// run from the bore to the rim — so straddling triangles are cut on the
+// cylinder instead. These tests pin both halves of that: the cut lands on the
+// real radius, and cutting does not lose, duplicate or unstitch anything.
+const ZONE_CASES = [
+  ['3 materials, segmented, extruded', { materials: { tread: 'tpu', web: 'petg', hub: 'abs' } }],
+  ['2 materials, honeycomb, crowned loft', { diameter: 200, width: 40, infill: 'honeycomb', tread: 'lugged', profile: { shape: 'crowned', crownDrop: 4 }, materials: { tread: 'tpu' } }],
+  ['2 materials, one piece, voronoi', { diameter: 180, width: 40, infill: 'voronoi', tread: 'slick', bore: { type: 'bolt' }, materials: { hub: 'petg', web: 'tpu', tread: 'tpu' } }],
+  ['2 materials, chevron loft', { diameter: 300, width: 50, infill: 'solid', tread: 'chevron', treadAngle: 30, materials: { tread: 'tpu' } }],
+];
+
+// The mesh the preview would build before it is grouped.
+function baseGeometry(plan, u) {
+  const shaped = plan.sections.length > 1 || classifyCutters(u.cutters).tire;
+  return (
+    (shaped ? buildLoftGeometry(THREE, plan, u) : null) ||
+    new THREE.ExtrudeGeometry(buildPieceShape(THREE, plan, u), {
+      depth: plan.W,
+      bevelEnabled: false,
+      curveSegments: 48,
+    })
+  );
+}
+
+test('zone groups put every triangle inside the band its material owns', () => {
+  for (const [name, cfg] of ZONE_CASES) {
+    const plan = planWheel(cfg);
+    const bounds = plan.zones.slice(1).map((z) => z.r0);
+    assert.ok(bounds.length >= 1, `${name}: more than one zone`);
+    for (const u of plan.uniquePieces) {
+      const geo = groupByZone(THREE, baseGeometry(plan, u), bounds);
+      const pos = geo.getAttribute('position');
+      const idx = geo.getIndex();
+      assert.equal(geo.groups.length, plan.zones.length, `${name}: one draw group per zone`);
+      const edges = [0, ...bounds, Infinity];
+      let covered = 0;
+      for (const g of geo.groups) {
+        const lo = edges[g.materialIndex];
+        const hi = edges[g.materialIndex + 1];
+        covered += g.count;
+        assert.ok(g.count > 0, `${name}: zone ${g.materialIndex} has geometry`);
+        for (let i = g.start; i < g.start + g.count; i++) {
+          const v = idx.getX(i);
+          const r = Math.hypot(pos.getX(v), pos.getY(v));
+          // Positions are stored as float32, so the cut lands on the cylinder
+          // to about 1e-5 mm at rim radii — a hundredth of the planner's grid.
+          assert.ok(
+            r > lo - 1e-4 && r < hi + 1e-4,
+            `${name}: vertex at r=${r.toFixed(4)} is outside its zone [${lo}, ${hi}]`
+          );
+        }
+      }
+      assert.equal(covered, idx.count, `${name}: the groups cover every triangle exactly once`);
+    }
+  }
+});
+
+test('splitting a piece into zones neither adds nor removes material', () => {
+  for (const [name, cfg] of ZONE_CASES) {
+    const plan = planWheel(cfg);
+    const bounds = plan.zones.slice(1).map((z) => z.r0);
+    for (const u of plan.uniquePieces) {
+      const base = baseGeometry(plan, u);
+      const want = signedVolume(base);
+      const got = signedVolume(groupByZone(THREE, base, bounds));
+      assert.ok(Math.abs(want) > 1, `${name}: the piece encloses something`);
+      assert.ok(
+        Math.abs(got - want) / Math.abs(want) < 1e-6,
+        `${name}: grouped mesh encloses ${got.toFixed(1)} mm³ against ${want.toFixed(1)} mm³`
+      );
+    }
+  }
+});
+
+test('a watertight piece is still watertight once it is split into zones', () => {
+  // Only the lofted path is indexed and shares vertices between triangles, so
+  // it is the only one where "every edge belongs to two faces" means anything
+  // — and the only one where a cut vertex could fail to be shared.
+  //
+  // Welded by position, for the same reason the test above is: creasing splits
+  // a vertex once per group of faces that share a normal, so the shell is only
+  // closed geometrically, not by index. A cut vertex inherits that — the two
+  // triangles either side of a crease that the boundary crosses each get their
+  // own copy, at the same point.
+  for (const [name, cfg] of ZONE_CASES) {
+    const plan = planWheel(cfg);
+    const bounds = plan.zones.slice(1).map((z) => z.r0);
+    for (const u of plan.uniquePieces) {
+      const base = buildLoftGeometry(THREE, plan, u);
+      if (!base) continue;
+      const split = groupByZone(THREE, base, bounds);
+      const idx = split.getIndex().array;
+      const weld = weldByPosition(split.getAttribute('position'));
+      const edges = new Map();
+      for (let i = 0; i < idx.length; i += 3) {
+        const t = [idx[i], idx[i + 1], idx[i + 2]].map((v) => weld[v]);
+        if (new Set(t).size < 3) continue; // a zero-area fan triangle, as above
+        for (let k = 0; k < 3; k++) {
+          const [a, b] = [t[k], t[(k + 1) % 3]];
+          const key = a < b ? `${a}_${b}` : `${b}_${a}`;
+          edges.set(key, (edges.get(key) || 0) + 1);
+        }
+      }
+      const open = [...edges.values()].filter((v) => v !== 2).length;
+      assert.equal(open, 0, `${name}: ${open} edges are not shared by exactly two faces`);
+    }
+  }
+});
+
+test('a single-material wheel is handed back the mesh it came in with', () => {
+  const plan = planWheel({ diameter: 200, width: 40, infill: 'honeycomb' });
+  assert.equal(plan.multiMaterial, false);
+  const base = baseGeometry(plan, plan.uniquePieces[0]);
+  assert.equal(groupByZone(THREE, base, plan.zones.slice(1).map((z) => z.r0)), base);
 });

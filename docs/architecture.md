@@ -104,6 +104,11 @@ If the web band collapses (hub nearly touching rim) the planner degrades to a
 solid web and says so in the notes, rather than emitting a pattern that would
 undercut the rings.
 
+Those band walls are also where a **material change** can be asked for: `rHub`
+and `rRimIn` are the only two cylinders in the wheel that are solid all the way
+round whatever the web is doing, so they are the only two places two filaments
+can meet on a complete annular face. See §12.
+
 ## 5. Dovetail joints
 
 Seams are radial planes. Each seam carries **axial slide dovetails**: a
@@ -204,7 +209,7 @@ count fits, in quantised steps so tuned configurations stay byte-identical.
 
 ### 9.2 The chart — how the curved webs are built
 
-The lattice, auxetic and voronoi webs are laid out in an **unrolled** band:
+The lattice, auxetic, graded and voronoi webs are laid out in an **unrolled** band:
 
 ```
   Φ(θ, t) = polar(rWebIn + t·bandW, θ)      θ ∈ [0, A]°,  t ∈ [0, 1]
@@ -253,7 +258,25 @@ Cells sit on concentric rings, brick-staggered ring to ring, all sharing one
 angular pitch taken from the **outermost** ring (the roomiest), so columns line
 up and inner rings drop only the columns the seam keep-outs actually cost them.
 
-### 9.5 Voronoi
+### 9.5 Graded rings
+
+Concentric rings of cells that grow with the radius — the regular counterpart to the
+voronoi. One angular pitch is shared by the whole web, so a cell is as wide as its
+radius makes it, and `grade` spaces the ring boundaries geometrically so the height
+grows with it: every cell a scaled copy of the one inside it. Walls hold the same two
+ways the auxetic's do — a full `wall` between ring boundaries radially, and an angular
+gap subtending a `wall` chord at each ring's *inner* radius.
+
+Two wrinkles are worth knowing. The seam keep-out is a fixed number of millimetres, so
+it costs a hub ring several times the degrees it costs a rim ring; each ring therefore
+takes the whole number of cells nearest the shared pitch and **stretches to fill its own
+run**, rather than centring a short row and leaving most of a cell standing solid beside
+the joint. And `swirl` leans every cell off radial by shearing the chart — at any given
+`t` it moves every cell of a ring by the same amount, which is exactly why the walls
+survive it; the run gives that lean back at both ends, so a swirled ring carries fewer
+cells rather than losing them to the seam.
+
+### 9.6 Voronoi
 
 Jittered-grid seeds in the chart, two rounds of Lloyd relaxation (even, but not
 machined-looking), then every cell pulled back by half a wall. The pull-back is
@@ -396,8 +419,8 @@ Crowns could not be cut at all, because that engine refused any boolean whose
 operands carried curved faces.
 
 OpenCascade has none of those limits. The busiest wheel in the matrix subtracts
-35 tools from a lofted solid in about a second, and the whole 19-configuration
-matrix builds in 36.6 s of kernel time. So the through/partial distinction stops
+35 tools from a lofted solid in about a second, and the 19 configurations the
+two backends were compared over built in 36.6 s of kernel time. So the through/partial distinction stops
 being load-bearing: it survives only as `z0`/`z1`, which grooves genuinely need,
 and `region()` seed points are not needed at all.
 
@@ -435,6 +458,37 @@ module run in Node and in the browser (where they are fetched from `/lib/occ`).
 Alongside the sources the generator emits `ASSEMBLY.md` (print settings,
 adhesive, glue-up order, build commands, warnings) and `wheelwright.json` (the
 full parameter set and piece list — the machine-readable half of the bundle).
+
+**Splitting a piece into filaments.** A multi-material wheel is not built
+differently — it is built exactly as above, and then intersected with one
+annulus per filament (`split_zones`). The zones are consecutive rings that
+start at the axis and finish past the tread, so the bodies tile the piece; the
+boundaries are cylinders, so neighbours share their face exactly, which is what
+a slicer needs from the parts of one object.
+
+The boundary radii are the two band walls from §4, `rHub` and `rRimIn`, and
+they are the only two candidates. A material boundary has to be a surface that
+is solid all the way round, and those two are: every web pattern is laid out
+inside `[rHub + 0.5, rRimIn − 0.5]` (§9), no dovetail reaches either (§5), the
+tire tool stops at the rim ring (§10) and bolt holes clear the hub ring (§4).
+`wheel.test.js` sweeps 2 100 configurations and checks that nothing the planner
+cuts crosses either line. `rRimIn` also keeps the whole rim ring — and so both
+its dovetails and a real sidewall — with the tread rather than with the web;
+the tempting alternative, the bar-window floor at `R − treadEff`, is a surface
+the piece profile already lies on, which is the one place a boolean must never
+be asked to cut (see the tangency rule above).
+
+Neighbouring bands naming the same filament are merged before emission, so a
+wheel is written as one file per body actually printed rather than one per
+band.
+
+The intersections have the same silent failure mode as the tire tool, in both
+directions: a tool that misses returns nothing, and one whose seam lands in the
+plane of a face of the body can return the *whole* body. Both hand back valid,
+watertight, wheel-shaped solids. So `split_zones` measures: the bodies have to
+add back up to the piece they came from, to 0.01 %, or it raises rather than
+writing them. That is a stronger check than the tire's, because it needs no
+control build — the piece is its own control.
 
 **The failure mode to know about.** Three of the rules above — the seam, the
 radial overshoot, the fuzzy value — exist because of the same thing: a boolean
@@ -491,31 +545,34 @@ code: minimum hub vertex radius equals the bore radius, no stray geometry.
 
 ## 15. Testing strategy
 
-`npm test` runs 135 `node:test` cases with no dependencies and no network:
+`npm test` runs 194 `node:test` cases with no dependencies and no network:
 
 | Suite | What it pins |
 | --- | --- |
-| `wheel.test.js` (68) | Chunking math, joint clearance, dedupe, bolt/seam clearance, bore schemes, and the web patterns' guarantees — cell-to-cell wall, no overlap, no nesting, no self-crossing loops, band containment, seam clearance, measured on the finished millimetre geometry across 31 configurations. |
-| `occgen.test.js` (35) | The emitted bundle across a 14-config matrix. The data blocks are read back and checked as geometry rather than as text: every loop closes to 1e-6 mm, every arc agrees with its own centre, cutters carry a sane depth range, a crowned piece emits congruent sections, and a configuration regenerates byte-identically. |
-| `preview.test.js` (22) | The rendered triangulation matches the plan (this is where phantom-cylinder-class bugs die), including that a crowned piece previews crowned, that every lofted mesh is watertight and outward-facing, and that it encloses the same volume the equivalent extrusion does — the check that catches an inverted void. |
+| `wheel.test.js` (99) | Chunking math, joint clearance, dedupe, bolt/seam clearance, bore schemes, and the web patterns' guarantees — cell-to-cell wall, no overlap, no nesting, no self-crossing loops, band containment, seam clearance, measured on the finished millimetre geometry across 50 configurations. Also the material-zone invariant: 2 400 configurations, nothing the planner cuts crosses a zone boundary, so the two bodies always meet on a complete annulus. |
+| `occgen.test.js` (47) | The emitted bundle across an 18-config matrix. The data blocks are read back and checked as geometry rather than as text: every loop closes to 1e-6 mm, every arc agrees with its own centre, cutters carry a sane depth range, a crowned piece emits congruent sections, the emitted `ZONES` tile the piece with no gap, and a configuration regenerates byte-identically. |
+| `preview.test.js` (31) | The rendered triangulation matches the plan (this is where phantom-cylinder-class bugs die), including that a crowned piece previews crowned, that every lofted mesh is watertight and outward-facing, and that it encloses the same volume the equivalent extrusion does — the check that catches an inverted void. Splitting a mesh into material zones has to preserve all three: same volume, still watertight, every triangle inside its own band. |
 | `units.test.js` (6) | mm ⇄ in round-trips, which fields are lengths, and that the form table can't drift from `LENGTH_FIELDS`. |
 | `env.test.js` (4) | `.env` parsing, and that the kernel status object keeps its shape whether or not OpenCascade is installed. |
 
-Above that, `npm run validate` regenerates a 19-configuration matrix and — when
+Above that, `npm run validate` regenerates a 24-configuration matrix and — when
 OpenCascade is installed — builds **every piece through the real kernel**,
 failing the run if any piece comes back an invalid B-rep. The matrix is chosen
 for shape diversity, not coverage optics: it includes the round-cell and
 filleted-cell honeycombs, all three chart webs, a segmented bolt hub, a
 D-bore, chevron and angled bars across a seam, and the two curved
 cross-sections, because those are the profile shapes the kernel sees nowhere
-else.
+else — plus three multi-material wheels, where each piece is split into bodies
+after it is built.
 
-The whole matrix currently builds **19/19, 28 pieces, ~22 s of kernel time**,
-every piece a valid B-rep and every STL watertight. It also re-builds each
+The whole matrix currently builds **24/24, 36 pieces, ~46 s of kernel
+time**, every piece a valid B-rep and every STL watertight. It also re-builds each
 crowned configuration without its tire tool and fails if that made no
-difference — see §12. For contrast, the same matrix against the hosted
-KCL engine managed 14/19, with the five failures being timeouts and dropped
-connections rather than geometry errors, and single pieces costing 85–146 s
+difference, and checks that every multi-material piece came back as the bodies
+the planner asked for — see §12. For contrast, the 19 of those configurations
+that predate the backend change managed 14/19 against the hosted KCL engine,
+with the five failures being timeouts and dropped connections rather than
+geometry errors, and single pieces costing 85–146 s
 ([zoo-api-notes.md](zoo-api-notes.md#test-surface)). That gap is the reason
 for the backend change, and §12 is what it bought.
 

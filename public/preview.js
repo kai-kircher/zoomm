@@ -312,10 +312,184 @@ const signedArea = (pts) => {
   return a / 2;
 };
 
-// The planner rounds every coordinate it emits to this grid, so two points
-// closer together than one step of it are not two points — they are one point
-// that reached the profile twice, and either preview path may weld them.
+// How far apart two ring samples have to be before they are separate points.
+//
+// The planner's own grid. The measurement backs it up: on a crowned lugged
+// wheel the pairs a collapsed bar window leaves sit 1e-6 to 1.7e-4 mm apart
+// while every real neighbour is at least 4.5e-2 mm away — three orders of
+// clear air either side. Three things read it: the cap triangulation, which
+// tears around such a pair; `creasedNormals`, which cannot take a direction
+// from an edge shorter than the grid its ends were rounded to; and
+// `buildPrismGeometry`, which welds the pairs off the profile outright.
 const MERGE = 1e-3;
+
+// Crease angle for the shaped mesh's normals.
+//
+// It has to sit above the coarsest sampling step and below the shallowest real
+// edge, and the gap is wide: the crown is sampled at most 4.5° apart (40 arc
+// levels over a half turn at worst, `tireLevels`) and the circumference at 3.75°
+// (`ARC_FULL`), while every edge the piece actually has — a rim, a groove
+// wall, a tread window, a void corner, a dovetail flank — turns by 90° or
+// more. Anything from ~10° to ~80° would do; 35° is the middle of it.
+const CREASE_DEG = 35;
+
+// Vertex normals that respect the piece's edges.
+//
+// The rings are stitched into one *indexed* mesh, so a rim vertex belongs to
+// the end cap and to the side wall, and a void's corner belongs to both walls
+// meeting there. `computeVertexNormals` averages a vertex over every face on
+// it, which rounds the shading off every hard edge the piece has: pockets read
+// as funnels instead of square holes, and each end cap picks up a fan of
+// streaks off its own rim, because earcut's long thin triangles carry the
+// tilted rim normals a long way inward. Unshaped pieces never showed it —
+// `ExtrudeGeometry` is non-indexed, so three.js already shades it flat.
+//
+// Flat shading everywhere would fix that and throw away the thing this mesh
+// exists for: the crown is a real curve and has to stay smooth. So a vertex is
+// split once per group of faces that meet smoothly on it — the crown's strips
+// stay one group and keep their averaged normal, while a cap and the wall
+// sharing a rim vertex become two. Positions are copied, never moved, so the
+// shell stays exactly as watertight as it was built.
+function creasedNormals(pos, idx, creaseDeg) {
+  const V = pos.length / 3;
+  const F = idx.length / 3;
+  const cosMax = Math.cos(d2r(creaseDeg));
+
+  // Face normals: unnormalised (its length is twice the area, which is the
+  // weight an averaged normal wants) and unit (what the crease test needs).
+  const fn = new Float64Array(F * 3);
+  const fu = new Float64Array(F * 3);
+  // A triangle only votes on shading if it has a direction worth trusting.
+  // An edge shorter than the planner's grid (see MERGE) is the difference of
+  // two coordinates that were each rounded to it, so its direction is noise,
+  // and so is the plane it helps define. Collapsed bar windows leave a run of
+  // those — fanned back into the caps with no area at all, and left along the
+  // walls as slivers a micron wide where a window closes between two levels.
+  const live = new Uint8Array(F);
+  for (let f = 0; f < F; f++) {
+    const a = idx[f * 3] * 3;
+    const b = idx[f * 3 + 1] * 3;
+    const c = idx[f * 3 + 2] * 3;
+    const ux = pos[b] - pos[a];
+    const uy = pos[b + 1] - pos[a + 1];
+    const uz = pos[b + 2] - pos[a + 2];
+    const vx = pos[c] - pos[a];
+    const vy = pos[c + 1] - pos[a + 1];
+    const vz = pos[c + 2] - pos[a + 2];
+    const x = uy * vz - uz * vy;
+    const y = uz * vx - ux * vz;
+    const z = ux * vy - uy * vx;
+    fn[f * 3] = x;
+    fn[f * 3 + 1] = y;
+    fn[f * 3 + 2] = z;
+    const len = Math.hypot(x, y, z);
+    const thin =
+      Math.hypot(ux, uy, uz) < MERGE ||
+      Math.hypot(vx, vy, vz) < MERGE ||
+      Math.hypot(vx - ux, vy - uy, vz - uz) < MERGE;
+    if (len > 1e-12 && !thin) {
+      live[f] = 1;
+      fu[f * 3] = x / len;
+      fu[f * 3 + 1] = y / len;
+      fu[f * 3 + 2] = z / len;
+    }
+  }
+
+  // vertex → the corners (face × 3 + slot, i.e. an index into `idx`) on it.
+  const start = new Uint32Array(V + 1);
+  for (let e = 0; e < idx.length; e++) start[idx[e] + 1]++;
+  for (let v = 0; v < V; v++) start[v + 1] += start[v];
+  const fill = Uint32Array.from(start.subarray(0, V));
+  const adj = new Uint32Array(idx.length);
+  for (let e = 0; e < idx.length; e++) adj[fill[idx[e]]++] = e;
+
+  // A vertex can split at most once per face on it, so the corner count is a
+  // ceiling for the output; it is trimmed to the real size on the way out.
+  // Everything below reuses flat scratch — a mesh this size would otherwise
+  // spend most of its time allocating two-element arrays.
+  const outIdx = new Uint32Array(idx.length);
+  const outPos = new Float32Array(idx.length * 3);
+  const outNrm = new Float32Array(idx.length * 3);
+  const at = new Int32Array(idx.length); // group each corner joined, by adjacency slot
+  const grow = (a) => {
+    const b = new Float64Array(a.length * 2);
+    b.set(a);
+    return b;
+  };
+  let rep = new Float64Array(24 * 3); // unit normal of the face that opened each group
+  let acc = new Float64Array(24 * 3); // area-weighted sum over the group
+  let out = 0;
+  for (let v = 0; v < V; v++) {
+    let n = 0; // groups on this vertex
+    for (let i = start[v]; i < start[v + 1]; i++) {
+      const f = (adj[i] / 3) | 0;
+      if (!live[f]) {
+        at[i] = -1; // sorted out below, once we know a group exists
+        continue;
+      }
+      let g = 0;
+      for (; g < n; g++) {
+        if (rep[g * 3] * fu[f * 3] + rep[g * 3 + 1] * fu[f * 3 + 1] + rep[g * 3 + 2] * fu[f * 3 + 2] >= cosMax) break;
+      }
+      if (g === n) {
+        if ((n + 1) * 3 > rep.length) {
+          rep = grow(rep);
+          acc = grow(acc);
+        }
+        rep[g * 3] = fu[f * 3];
+        rep[g * 3 + 1] = fu[f * 3 + 1];
+        rep[g * 3 + 2] = fu[f * 3 + 2];
+        acc[g * 3] = acc[g * 3 + 1] = acc[g * 3 + 2] = 0;
+        n++;
+      }
+      acc[g * 3] += fn[f * 3];
+      acc[g * 3 + 1] += fn[f * 3 + 1];
+      acc[g * 3 + 2] += fn[f * 3 + 2];
+      at[i] = g;
+    }
+    // A vertex with nothing but noise on it still has to exist, or the
+    // triangles holding it would index past the end of the buffer.
+    if (n === 0) {
+      acc[0] = acc[1] = 0;
+      acc[2] = 1; // an arbitrary unit normal; nothing that draws will use it
+      n = 1;
+    }
+    const base = out;
+    let dom = 0;
+    let domLen = -1;
+    for (let g = 0; g < n; g++) {
+      const x = acc[g * 3];
+      const y = acc[g * 3 + 1];
+      const z = acc[g * 3 + 2];
+      const len = Math.hypot(x, y, z);
+      if (len > domLen) {
+        domLen = len;
+        dom = g;
+      }
+      outPos[out * 3] = pos[v * 3];
+      outPos[out * 3 + 1] = pos[v * 3 + 1];
+      outPos[out * 3 + 2] = pos[v * 3 + 2];
+      outNrm[out * 3] = x / (len || 1);
+      outNrm[out * 3 + 1] = y / (len || 1);
+      outNrm[out * 3 + 2] = z / (len || 1);
+      out++;
+    }
+    // A face that could not vote shades with whichever surface holds most of
+    // this vertex, rather than with whichever one the index buffer happened to
+    // reach first — where a window closes between two levels the wall is left
+    // with a sliver a micron wide, and that is the wall's corner, not a coin
+    // toss with the crown beside it.
+    for (let i = start[v]; i < start[v + 1]; i++) {
+      outIdx[adj[i]] = base + (at[i] < 0 ? dom : at[i]);
+    }
+  }
+
+  return {
+    position: outPos.subarray(0, out * 3),
+    normal: outNrm.subarray(0, out * 3),
+    index: outIdx,
+  };
+}
 
 // Earcut bridges every hole into the outline before it triangulates: from the
 // hole's leftmost vertex it casts a ray in −x and connects to the first edge
@@ -485,11 +659,7 @@ export function buildLoftGeometry(THREE, plan, unique) {
   // take it in their stride, but earcut quietly drops triangles around it and
   // returns a torn cap.
   //
-  // So the cap is triangulated from the ring with those pairs merged, on the
-  // planner's own grid (MERGE). The measurement backs the threshold up here
-  // too: on a crowned lugged wheel the collapsed pairs sit 1e-6 to 1.7e-4 mm
-  // apart while every real neighbour is at least 4.5e-2 mm away — three orders
-  // of clear air either side.
+  // So the cap is triangulated from the ring with those pairs merged.
   const distinct = (ring) => {
     const keep = [];
     for (let i = 0; i < ring.length; i++) {
@@ -535,9 +705,10 @@ export function buildLoftGeometry(THREE, plan, unique) {
   }
 
   const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-  geo.setIndex(idx);
-  geo.computeVertexNormals();
+  const { position, normal, index } = creasedNormals(pos, idx, CREASE_DEG);
+  geo.setAttribute('position', new THREE.BufferAttribute(position, 3));
+  geo.setAttribute('normal', new THREE.BufferAttribute(normal, 3));
+  geo.setIndex(new THREE.BufferAttribute(index, 1));
   return geo;
 }
 
@@ -604,6 +775,151 @@ export function buildPrismGeometry(THREE, plan, unique, section = plan.outline) 
   return geo.rotateZ(-theta);
 }
 
+// ---------------------------------------------------------------------------
+// Material zones
+// ---------------------------------------------------------------------------
+
+// One colour per filament, so a multi-material wheel is read by *what* rather
+// than by *which piece*. app.js draws its legend from this same table.
+export const MATERIAL_COLORS = { pla: 0x8fbf6e, petg: 0x5f7db5, abs: 0x99a3b8, tpu: 0xd9734f };
+
+export const cssColor = (n) => `#${n.toString(16).padStart(6, '0')}`;
+
+// Re-index a finished piece mesh into one draw group per material zone, so the
+// preview can hand three.js one material per zone and get the real split back.
+//
+// Assigning whole triangles by their centroid would be cheaper and wrong: a
+// cap triangle out of the ear-clipper can run from the bore to the rim, so the
+// colour boundary would wander tens of millimetres off the cylinder the kernel
+// actually cuts at. So triangles that straddle a boundary are cut on it —
+// exactly, by solving |A + t(B − A)| = r rather than interpolating the radius,
+// which is not linear along an edge. The chord left between two crossings
+// approximates the boundary circle the same way every other curve in this mesh
+// is approximated, and the vertices it adds are shared between the two
+// triangles on that edge so the shell stays closed.
+export function groupByZone(THREE, geo, bounds) {
+  if (!bounds.length) return geo;
+  if (!geo.getAttribute('normal')) geo.computeVertexNormals();
+  const srcPos = geo.getAttribute('position');
+  const srcNor = geo.getAttribute('normal');
+  const index = geo.getIndex();
+
+  // Vertex pool: the mesh's own vertices, then one per edge crossing.
+  const pos = [];
+  const nor = [];
+  for (let i = 0; i < srcPos.count; i++) {
+    pos.push(srcPos.getX(i), srcPos.getY(i), srcPos.getZ(i));
+    nor.push(srcNor.getX(i), srcNor.getY(i), srcNor.getZ(i));
+  }
+  const radiusOf = (v) => Math.hypot(pos[v * 3], pos[v * 3 + 1]);
+  const zoneOf = (r) => {
+    let k = 0;
+    while (k < bounds.length && r >= bounds[k]) k++;
+    return k;
+  };
+  const clamp01 = (t) => (t < 0 ? 0 : t > 1 ? 1 : t);
+
+  // Where the segment a→b crosses the cylinder of radius rc, as a fraction of
+  // the way along it. |A + t·D|² = rc² is a quadratic in t; the linear guess
+  // is only the tie-break between its two roots, and the fallback for an edge
+  // that runs along the cylinder rather than through it.
+  const crossingT = (a, b, rc) => {
+    const ax = pos[a * 3];
+    const ay = pos[a * 3 + 1];
+    const dx = pos[b * 3] - ax;
+    const dy = pos[b * 3 + 1] - ay;
+    const ra = Math.hypot(ax, ay);
+    const rb = Math.hypot(pos[b * 3], pos[b * 3 + 1]);
+    const lin = Math.abs(rb - ra) > 1e-12 ? (rc - ra) / (rb - ra) : 0.5;
+    const qa = dx * dx + dy * dy;
+    if (qa < 1e-18) return clamp01(lin);
+    const qb = 2 * (ax * dx + ay * dy);
+    const disc = qb * qb - 4 * qa * (ax * ax + ay * ay - rc * rc);
+    if (disc < 0) return clamp01(lin);
+    const s = Math.sqrt(disc);
+    let best = null;
+    for (const t of [(-qb - s) / (2 * qa), (-qb + s) / (2 * qa)]) {
+      if (t < -1e-9 || t > 1 + 1e-9) continue;
+      if (best === null || Math.abs(t - lin) < Math.abs(best - lin)) best = t;
+    }
+    return clamp01(best === null ? lin : best);
+  };
+
+  // One vertex per (edge, boundary), shared by both triangles along that edge.
+  const cuts = new Map();
+  const cutVertex = (a, b, k) => {
+    const lo = Math.min(a, b);
+    const hi = Math.max(a, b);
+    const key = `${lo},${hi},${k}`;
+    const seen = cuts.get(key);
+    if (seen !== undefined) return seen;
+    const t = crossingT(lo, hi, bounds[k]);
+    const v = pos.length / 3;
+    for (const arr of [pos, nor]) {
+      for (let c = 0; c < 3; c++) arr.push(arr[lo * 3 + c] + (arr[hi * 3 + c] - arr[lo * 3 + c]) * t);
+    }
+    const L = Math.hypot(nor[v * 3], nor[v * 3 + 1], nor[v * 3 + 2]) || 1;
+    for (let c = 0; c < 3; c++) nor[v * 3 + c] /= L;
+    cuts.set(key, v);
+    return v;
+  };
+
+  // Sutherland–Hodgman against one boundary cylinder. A vertex sitting exactly
+  // on it counts as being on both sides, which is what keeps the two halves
+  // sharing it. Cutting a triangle with a chord leaves convex pieces, so a fan
+  // triangulates them.
+  const clip = (poly, k, inner) => {
+    const rc = bounds[k];
+    const side = (v) => (inner ? radiusOf(v) <= rc : radiusOf(v) >= rc);
+    const out = [];
+    for (let i = 0; i < poly.length; i++) {
+      const a = poly[i];
+      const b = poly[(i + 1) % poly.length];
+      const ain = side(a);
+      if (ain) out.push(a);
+      if (ain !== side(b)) out.push(cutVertex(a, b, k));
+    }
+    return out;
+  };
+
+  const buckets = Array.from({ length: bounds.length + 1 }, () => []);
+  const fan = (poly, k) => {
+    for (let i = 2; i < poly.length; i++) {
+      const [a, b, c] = [poly[0], poly[i - 1], poly[i]];
+      if (a !== b && b !== c && a !== c) buckets[k].push(a, b, c);
+    }
+  };
+
+  const triCount = (index ? index.count : srcPos.count) / 3;
+  for (let t = 0; t < triCount; t++) {
+    const v = [0, 1, 2].map((j) => (index ? index.getX(t * 3 + j) : t * 3 + j));
+    const z = v.map((i) => zoneOf(radiusOf(i)));
+    if (z[0] === z[1] && z[1] === z[2]) {
+      buckets[z[0]].push(v[0], v[1], v[2]);
+      continue;
+    }
+    let rest = v;
+    for (let k = 0; k < bounds.length && rest.length; k++) {
+      const inside = clip(rest, k, true);
+      if (inside.length >= 3) fan(inside, k);
+      rest = clip(rest, k, false);
+    }
+    if (rest.length >= 3) fan(rest, bounds.length);
+  }
+
+  const out = new THREE.BufferGeometry();
+  out.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  out.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
+  const idx = [];
+  buckets.forEach((b, k) => {
+    if (!b.length) return;
+    out.addGroup(idx.length, b.length, k);
+    for (const i of b) idx.push(i);
+  });
+  out.setIndex(idx);
+  return out;
+}
+
 export async function createPreview(canvas) {
   try {
     const [T, { OrbitControls }] = await Promise.all([
@@ -652,9 +968,29 @@ function create3D(canvas, { T: THREE, OrbitControls }) {
     // cuts as a solid of revolution. Extruding is cheaper and tessellates the
     // arcs more finely, so plain wheels keep it.
     const shaped = plan.sections.length > 1 || classifyCutters(unique.cutters).tire;
-    const geo =
+    const base =
       (shaped ? buildLoftGeometry(THREE, plan, unique) : null) || buildPrismGeometry(THREE, plan, unique);
-    return { geo };
+    // The kernel splits the solid at these radii; the mesh is split at the
+    // same ones so the preview shows the bodies that will actually be printed.
+    return { geo: groupByZone(THREE, base, plan.zones.slice(1).map((z) => z.r0)) };
+  }
+
+  // A single-material wheel keeps its per-piece colours — the question that
+  // view answers is "which piece is which". Once there is more than one
+  // filament the question changes, so the colours do too: one per material,
+  // matching the zone groups above. TPU is drawn matte, because it is.
+  function materialsFor(plan, fallback) {
+    if (!plan.multiMaterial) {
+      return new THREE.MeshStandardMaterial({ color: fallback, roughness: 0.55, metalness: 0.15 });
+    }
+    return plan.zones.map(
+      (z) =>
+        new THREE.MeshStandardMaterial({
+          color: MATERIAL_COLORS[z.material],
+          roughness: z.material === 'tpu' ? 0.85 : 0.5,
+          metalness: z.material === 'tpu' ? 0.02 : 0.15,
+        })
+    );
   }
 
   function rebuild() {
@@ -672,11 +1008,7 @@ function create3D(canvas, { T: THREE, OrbitControls }) {
     if (!state.fitView) {
       for (const piece of plan.pieces) {
         const { geo } = geoByLabel.get(piece.label);
-        const mat = new THREE.MeshStandardMaterial({
-          color: PIECE_COLORS[piece.k % PIECE_COLORS.length],
-          roughness: 0.55,
-          metalness: 0.15,
-        });
+        const mat = materialsFor(plan, PIECE_COLORS[piece.k % PIECE_COLORS.length]);
         const g = new THREE.Group();
         // Nothing is drawn on top any more: the crown and every groove are in
         // the mesh itself, because the rings are shaped to the same running
@@ -692,8 +1024,7 @@ function create3D(canvas, { T: THREE, OrbitControls }) {
     } else {
       // Printer-fit view: one piece, print-oriented, inside the usable volume.
       const { geo } = geoByLabel.get(plan.uniquePieces[0].label);
-      const mat = new THREE.MeshStandardMaterial({ color: PIECE_COLORS[0], roughness: 0.55, metalness: 0.15 });
-      const mesh = new THREE.Mesh(geo, mat);
+      const mesh = new THREE.Mesh(geo, materialsFor(plan, PIECE_COLORS[0]));
       const g = new THREE.Group();
       g.add(mesh);
       g.rotation.z = d2r(plan.bbox.rotForPrint);
@@ -826,8 +1157,23 @@ function create2D(canvas) {
       const outline = new Path2D();
       const boreConsumed = tracePieceProfile(plan, u, pathEmitter(outline));
       outline.closePath();
-      ctx.fillStyle = PIECE_COLORS[piece.k % PIECE_COLORS.length];
+      // Concentric bands, painted outside in: an inner zone is the same
+      // outline clipped to its own boundary circle, so the colours fall on the
+      // exact radii the kernel cuts at rather than near them.
+      const zs = plan.zones;
+      ctx.fillStyle = plan.multiMaterial
+        ? cssColor(MATERIAL_COLORS[zs[zs.length - 1].material])
+        : PIECE_COLORS[piece.k % PIECE_COLORS.length];
       ctx.fill(outline);
+      for (let i = zs.length - 2; i >= 0; i--) {
+        const disk = new Path2D();
+        disk.arc(0, 0, zs[i].r1, 0, TAU);
+        ctx.save();
+        ctx.clip(disk);
+        ctx.fillStyle = cssColor(MATERIAL_COLORS[zs[i].material]);
+        ctx.fill(outline);
+        ctx.restore();
+      }
       ctx.strokeStyle = '#9fb4dd';
       ctx.lineWidth = 1 / scale;
       ctx.stroke(outline);

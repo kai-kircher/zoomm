@@ -231,6 +231,67 @@ test('tpu flexweb produces slots', () => {
   assert.ok(plan.infillInfo.slotsTotal >= plan.N);
 });
 
+// A flex-web slot is a curved centreline offset ±hw along its own normal. That
+// normal leans off tangential — the centreline is an arc, not a radial line —
+// so the offset carries a radial component and the corners overshoot the
+// centreline's ends. Slots used to reach 2 mm past the web band, 1.6 mm of it
+// into the rim; the planner now solves for the centreline ends that put the
+// finished slot's extremes on the band. Sampling the emitted arcs and caps is
+// what proves it: the extremes of both are interior, not at the corners.
+const arcPoints = (seg, n = 240) => {
+  const a0 = Math.atan2(seg.a[1] - seg.center[1], seg.a[0] - seg.center[0]);
+  const a1 = Math.atan2(seg.b[1] - seg.center[1], seg.b[0] - seg.center[0]);
+  let sweep = a1 - a0;
+  if (seg.ccw) while (sweep <= 1e-12) sweep += 2 * Math.PI;
+  else while (sweep >= -1e-12) sweep -= 2 * Math.PI;
+  return Array.from({ length: n + 1 }, (_, i) => {
+    const a = a0 + (sweep * i) / n;
+    return [seg.center[0] + seg.radius * Math.cos(a), seg.center[1] + seg.radius * Math.sin(a)];
+  });
+};
+const pathPoints = (cutter) =>
+  cutter.segs.flatMap((s) =>
+    s.kind === 'arc'
+      ? arcPoints(s)
+      : Array.from({ length: 17 }, (_, i) => [
+          s.a[0] + ((s.b[0] - s.a[0]) * i) / 16,
+          s.a[1] + ((s.b[1] - s.a[1]) * i) / 16,
+        ])
+  );
+
+test('flex-web slots stay inside the web band, corners and all', () => {
+  let checked = 0;
+  for (const diameter of [100, 140, 180, 220, 240, 260, 300, 400, 520, 640, 800]) {
+    for (const width of [25, 40, 60]) {
+      for (const bore of [
+        { type: 'keyed', diameter: 20 },
+        { type: 'hex', hexAcrossFlats: 13 },
+        { type: 'bolt' },
+        { type: 'plain', diameter: 12 },
+      ]) {
+        const plan = planWheel({ diameter, width, material: 'tpu', infill: 'flexweb', tread: 'slick', bore });
+        if (plan.infillInfo.style !== 'flexweb') continue;
+        const label = `d${diameter} w${width} ${bore.type}`;
+        const { rHub, rRimIn, rWebIn, rWebOut } = plan.radii;
+        const slots = plan.uniquePieces[0].cutters.filter((c) => c.id.startsWith('web'));
+        assert.ok(slots.length > 0, `${label} claims flexweb but cut no slots`);
+        for (const slot of slots) {
+          const rs = pathPoints(slot).map(([x, y]) => Math.hypot(x, y));
+          const lo = Math.min(...rs);
+          const hi = Math.max(...rs);
+          // The band the web owns, and the material on either side of it.
+          assert.ok(hi <= rWebOut + 1e-6, `${label} ${slot.id} reaches r=${hi.toFixed(3)}, past rWebOut=${rWebOut}`);
+          assert.ok(lo >= rWebIn - 1e-6, `${label} ${slot.id} reaches r=${lo.toFixed(3)}, inside rWebIn=${rWebIn}`);
+          assert.ok(hi <= rRimIn, `${label} ${slot.id} cuts into the rim band (r=${hi.toFixed(3)} > ${rRimIn})`);
+          assert.ok(lo >= rHub, `${label} ${slot.id} cuts into the hub (r=${lo.toFixed(3)} < ${rHub})`);
+          checked++;
+        }
+      }
+    }
+  }
+  assert.ok(checked > 100, `only ${checked} slots checked`);
+});
+
 test('honeycomb cell count is bounded', () => {
   const plan = planWheel({ diameter: 500, width: 60, infill: 'honeycomb', printer: { x: 300, y: 300, z: 300, margin: 10 } });
   if (plan.infillInfo.style === 'honeycomb') {
@@ -402,7 +463,7 @@ test('honeycomb cells never overlap and stay inside the web band', () => {
   }
 });
 
-// --- chart-drawn webs: lattice, auxetic, voronoi ---------------------------
+// --- chart-drawn webs: lattice, auxetic, graded, voronoi -------------------
 //
 // All three are laid out in the unrolled web band and mapped back through
 // Φ(θ, t) = polar(rWebIn + t·bandW, θ). Φ is injective on the strip, so cells
@@ -410,7 +471,7 @@ test('honeycomb cells never overlap and stay inside the web band', () => {
 // finished millimetre geometry proves the walls survive the mapping, the
 // chording and the corner fillets. These tests measure the emitted loops.
 
-const CELL_PREFIX = { lattice: 'lat', auxetic: 'aux', voronoi: 'vor' };
+const CELL_PREFIX = { lattice: 'lat', auxetic: 'aux', graded: 'grd', voronoi: 'vor' };
 const cellsOf = (plan) => {
   const pre = CELL_PREFIX[plan.infillInfo.style];
   return pre ? plan.uniquePieces[0].cutters.filter((c) => c.id.startsWith(pre)) : [];
@@ -528,6 +589,25 @@ const WEB_CASES = [
   ['auxetic, small cells', 3, { diameter: 400, infill: 'auxetic', auxetic: { cellSize: 10 }, printer: BIG_BED }],
   ['auxetic, one piece', 3, { diameter: 160, width: 45, infill: 'auxetic', tread: 'slick', bore: { type: 'bolt' } }],
   ['auxetic, sixteen segments', 3, { diameter: 700, infill: 'auxetic', segmentsOverride: 16 }],
+  ['graded, defaults', 2.6, { infill: 'graded' }],
+  ['graded, one ring', 2.6, { infill: 'graded', graded: { rings: 1 } }],
+  ['graded, eight rings', 2.6, { infill: 'graded', graded: { rings: 8 } }],
+  ['graded, uniform rings', 2.6, { infill: 'graded', graded: { grade: 0 } }],
+  ['graded, half graded', 2.6, { infill: 'graded', graded: { grade: 0.5 } }],
+  ['graded, rect cells', 2.6, { infill: 'graded', graded: { cellShape: 'rect' } }],
+  ['graded, diamond cells', 2.6, { infill: 'graded', graded: { cellShape: 'diamond' } }],
+  ['graded, thick wall', 6, { infill: 'graded', graded: { wall: 6 } }],
+  ['graded, sharp corners', 2.6, { infill: 'graded', graded: { cornerRadius: 0 } }],
+  ['graded, absurd fillet', 2.6, { infill: 'graded', graded: { cornerRadius: 40 } }],
+  ['graded, dense cells', 2.6, { diameter: 400, infill: 'graded', graded: { cells: 60 }, printer: BIG_BED }],
+  ['graded, coarse cells', 2.6, { diameter: 400, infill: 'graded', graded: { cells: 8 }, printer: BIG_BED }],
+  ['graded, swirled', 2.6, { infill: 'graded', graded: { swirl: 25 } }],
+  ['graded, swirled the other way', 2.6, { infill: 'graded', graded: { swirl: -60, cellShape: 'rect' } }],
+  ['graded, swirled diamonds, uniform', 2.6, { infill: 'graded', graded: { swirl: 40, cellShape: 'diamond', grade: 0 } }],
+  ['graded, one piece', 2.6, { diameter: 160, width: 45, infill: 'graded', tread: 'slick', bore: { type: 'bolt' } }],
+  ['graded, one piece swirled', 2.6, { diameter: 160, width: 45, infill: 'graded', tread: 'slick', bore: { type: 'bolt' }, graded: { swirl: 30 } }],
+  ['graded, two segments', 2.6, { diameter: 300, infill: 'graded', segmentsOverride: 2 }],
+  ['graded, sixteen segments', 2.6, { diameter: 700, infill: 'graded', segmentsOverride: 16 }],
   ['voronoi, defaults', 3, { infill: 'voronoi' }],
   ['voronoi, another seed', 3, { infill: 'voronoi', voronoi: { seed: 99 } }],
   ['voronoi, few cells', 3, { infill: 'voronoi', voronoi: { cells: 8 } }],
@@ -603,6 +683,136 @@ test('auxetic cells are re-entrant: the waist pinches inside the cell edges', ()
   }
 });
 
+// --- graded rings ----------------------------------------------------------
+//
+// The pattern's whole point is that cells grow with the radius, so that is
+// what gets measured: on the finished loops, ring by ring.
+
+// A cell's ring geometry, read off its emitted loop: the radii it spans and
+// the tangential width at each end and at its widest.
+function cellShape(loop) {
+  const pol = loop.map(([x, y]) => [Math.hypot(x, y), Math.atan2(y, x)]);
+  const rMin = Math.min(...pol.map((p) => p[0]));
+  const rMax = Math.max(...pol.map((p) => p[0]));
+  // Tangential extent of a set of loop points, as an angle and as arc.
+  const spreadAng = (pts) => {
+    if (pts.length < 2) return 0;
+    const th = pts.map((p) => p[1]);
+    return Math.max(...th) - Math.min(...th);
+  };
+  const spread = (pts) => spreadAng(pts) * (pts.reduce((s, p) => s + p[0], 0) / (pts.length || 1));
+  const band = Math.max(rMax - rMin, 1e-9);
+  const near = (r0) => pol.filter((p) => Math.abs(p[0] - r0) < 0.02 * band);
+  // Widest extent anywhere in the cell. Held as an angle as well as an arc:
+  // radial sides diverge, so even a cell of constant angular width measures
+  // wider in millimetres at its outer end than at its inner one.
+  let waist = 0;
+  let waistAng = 0;
+  for (let i = 0; i < 24; i++) {
+    const r0 = rMin + (band * (i + 0.5)) / 24;
+    const slice = pol.filter((p) => Math.abs(p[0] - r0) < band / 24);
+    waist = Math.max(waist, spread(slice));
+    waistAng = Math.max(waistAng, spreadAng(slice));
+  }
+  const mid = (pts) => {
+    const th = pts.map((p) => p[1]);
+    return [pts.reduce((s, p) => s + p[0], 0) / pts.length, (Math.max(...th) + Math.min(...th)) / 2];
+  };
+  return {
+    rMin,
+    rMax,
+    rMid: (rMin + rMax) / 2,
+    height: band,
+    waist,
+    outerEnd: spreadAng(near(rMax)) / waistAng,
+    innerEnd: spreadAng(near(rMin)) / waistAng,
+    outerMid: mid(near(rMax)),
+    innerMid: mid(near(rMin)),
+  };
+}
+
+// Cells grouped into their rings, innermost first — cells of one ring share a
+// radial band, so a gap in the sorted mid radii separates two rings.
+function ringsOf(plan) {
+  const cells = cellsOf(plan).map((c) => cellShape(loopOf(c)));
+  cells.sort((a, b) => a.rMid - b.rMid);
+  const rings = [[cells[0]]];
+  for (let i = 1; i < cells.length; i++) {
+    if (cells[i].rMin > rings[rings.length - 1][0].rMax - 0.01) rings.push([]);
+    rings[rings.length - 1].push(cells[i]);
+  }
+  return rings;
+}
+
+test('graded cells grow with the radius — in both directions, or only across', () => {
+  const cfg = (graded) => ({ diameter: 400, width: 60, infill: 'graded', tread: 'slick', printer: BIG_BED, graded });
+  const full = ringsOf(planWheel(cfg({ rings: 4 })));
+  assert.equal(full.length, 4, 'four rings of cells');
+  for (let i = 1; i < full.length; i++) {
+    const [inner, outer] = [full[i - 1][0], full[i][0]];
+    assert.ok(outer.waist > inner.waist * 1.05, `ring ${i} is wider than the one inside it (${outer.waist.toFixed(1)} > ${inner.waist.toFixed(1)})`);
+    assert.ok(outer.height > inner.height * 1.05, `ring ${i} is taller than the one inside it (${outer.height.toFixed(1)} > ${inner.height.toFixed(1)})`);
+  }
+  assert.ok(full[3][0].waist > full[0][0].waist * 1.8, 'the rim cells are far bigger than the hub cells');
+
+  // grade: 0 keeps every ring the same height. The cells still widen — one
+  // angular pitch buys more arc the further out it is read — but they do it
+  // by getting squatter, not by growing.
+  const flat = ringsOf(planWheel(cfg({ rings: 4, grade: 0 })));
+  assert.equal(flat.length, 4);
+  const heights = flat.map((r) => r[0].height);
+  assert.ok(Math.max(...heights) - Math.min(...heights) < 0.5, `uniform rings stay one height (${heights.map((h) => h.toFixed(1))})`);
+  assert.ok(flat[3][0].waist > flat[0][0].waist * 1.8, 'uniform rings still widen with the radius');
+});
+
+test('graded cell shapes: a diamond points, a rect runs straight, a hex is between', () => {
+  const cfg = (cellShape) => ({
+    diameter: 400, width: 60, infill: 'graded', tread: 'slick', printer: BIG_BED,
+    graded: { rings: 3, cornerRadius: 0, cellShape },
+  });
+  const endRatio = (shape) => {
+    const cells = ringsOf(planWheel(cfg(shape))).flat();
+    return cells.reduce((s, c) => s + (c.outerEnd + c.innerEnd) / 2, 0) / cells.length;
+  };
+  assert.ok(endRatio('diamond') < 0.05, 'diamond cells close to a point at both ends');
+  assert.ok(Math.abs(endRatio('rect') - 1) < 0.05, 'rect cells are as wide at the ends as at the waist');
+  const hex = endRatio('hex');
+  assert.ok(hex > 0.4 && hex < 0.7, `hex cells narrow towards the ends but keep a flat there (${hex.toFixed(2)})`);
+});
+
+test('swirl leans every cell off radial by the angle asked for', () => {
+  for (const swirl of [-40, 0, 20]) {
+    const plan = planWheel({
+      diameter: 400, width: 60, infill: 'graded', tread: 'slick', printer: BIG_BED,
+      graded: { rings: 3, swirl },
+    });
+    assert.equal(plan.infillInfo.swirl, swirl);
+    for (const c of ringsOf(plan).flat()) {
+      // The cell's centre line, from end to end: how far it travels around
+      // against how far it climbs.
+      const dTh = c.outerMid[1] - c.innerMid[1];
+      const arc = dTh * c.rMid;
+      const lean = (Math.atan2(arc, c.rMax - c.rMin) * 180) / Math.PI;
+      assert.ok(Math.abs(lean - swirl) < 4, `cell leans ${lean.toFixed(1)}°, asked for ${swirl}°`);
+    }
+  }
+});
+
+test('the cell count is a target the rings hold to, and rings are settable', () => {
+  const one = { diameter: 160, width: 45, infill: 'graded', tread: 'slick', bore: { type: 'bolt' } };
+  const plan = planWheel({ ...one, graded: { cells: 24, rings: 2 } });
+  assert.equal(plan.N, 1, 'a one-piece wheel has no seams to interrupt the rings');
+  assert.equal(plan.infillInfo.cellsPerTurn, 24);
+  assert.equal(plan.infillInfo.rings, 2);
+  for (const ring of ringsOf(plan)) assert.equal(ring.length, 24, 'every ring carries the count asked for');
+  // Asking for more cells makes them smaller, not merely more numerous.
+  const dense = planWheel({ ...one, graded: { cells: 40, rings: 2 } });
+  assert.ok(
+    dense.infillInfo.innerCell < plan.infillInfo.innerCell * 0.75,
+    `40 cells around are narrower than 24 (${dense.infillInfo.innerCell} vs ${plan.infillInfo.innerCell} mm)`
+  );
+});
+
 test('voronoi is reproducible from its seed and genuinely reseeds', () => {
   const cfg = (seed) => ({ diameter: 400, width: 60, infill: 'voronoi', tread: 'slick', voronoi: { seed, cells: 18 }, printer: BIG_BED });
   const a = planWheel(cfg(4));
@@ -627,7 +837,7 @@ test('voronoi is reproducible from its seed and genuinely reseeds', () => {
 });
 
 test('every chart web repeats per segment, so pieces still dedupe', () => {
-  for (const infill of ['lattice', 'auxetic', 'voronoi']) {
+  for (const infill of ['lattice', 'auxetic', 'graded', 'voronoi']) {
     // A plain bore has no hub features, so the web is the only thing that
     // could make two pieces differ.
     const plan = planWheel({ diameter: 400, width: 60, infill, tread: 'slick', bore: { type: 'plain', diameter: 20 } });
@@ -638,7 +848,7 @@ test('every chart web repeats per segment, so pieces still dedupe', () => {
 });
 
 test('a web band too narrow for the pattern falls back to solid and says so', () => {
-  for (const infill of ['lattice', 'auxetic', 'voronoi']) {
+  for (const infill of ['lattice', 'auxetic', 'graded', 'voronoi']) {
     // Big bolt circle + small wheel leaves almost nothing between hub and rim.
     const plan = planWheel({ diameter: 150, width: 30, infill, tread: 'slick', bore: { type: 'bolt', boltCount: 4, boltCircle: 100, boltHoleDia: 6, pilotDia: 20 } });
     assert.ok(plan.radii.rWebOut - plan.radii.rWebIn < 12, 'the repro really does squeeze the web band');
@@ -770,7 +980,7 @@ test('every tread × profile × web × hub combination yields closed, congruent 
   let count = 0;
   for (const tread of ['slick', 'ribbed', 'lugged', 'diamond', 'chevron', 'angled']) {
     for (const shape of ['flat', 'crowned', 'round']) {
-      for (const infill of ['solid', 'spokes', 'honeycomb', 'lattice', 'auxetic', 'voronoi']) {
+      for (const infill of ['solid', 'spokes', 'honeycomb', 'lattice', 'auxetic', 'graded', 'voronoi']) {
         for (const bore of ['keyed', 'hex', 'dbore', 'bolt']) {
           for (const diameter of [120, 355.6]) {
             const where = `${tread}/${shape}/${infill}/${bore}/Ø${diameter}`;
@@ -795,4 +1005,197 @@ test('every tread × profile × web × hub combination yields closed, congruent 
   }
   assert.ok(count > 500, `swept ${count} configurations`);
   assert.deepEqual(problems.slice(0, 5), [], `${problems.length} bad configurations`);
+});
+
+// ---------------------------------------------------------------------------
+// Material zones
+// ---------------------------------------------------------------------------
+
+// Radius range a cutter's boundary actually covers. Sampled rather than read
+// off the endpoints, because a chord passes closer to the axis than either of
+// its ends and an arc's extreme radius is usually somewhere in its middle.
+function radiusRange(cutter) {
+  const TAU = Math.PI * 2;
+  let lo = Infinity;
+  let hi = 0;
+  // A revolved tool's loop is drawn in the (r, z) half-plane, so there the
+  // radius is just the first coordinate; everything else is drawn in XY.
+  const radial = cutter.shape === 'revolve';
+  const at = (x, y) => {
+    const r = radial ? x : Math.hypot(x, y);
+    lo = Math.min(lo, r);
+    hi = Math.max(hi, r);
+  };
+  const line = (a, b) => {
+    for (let i = 0; i <= 32; i++) at(a[0] + ((b[0] - a[0]) * i) / 32, a[1] + ((b[1] - a[1]) * i) / 32);
+  };
+  const arc = (s) => {
+    const c = s.center;
+    const r = (Math.hypot(s.a[0] - c[0], s.a[1] - c[1]) + Math.hypot(s.b[0] - c[0], s.b[1] - c[1])) / 2;
+    const t0 = Math.atan2(s.a[1] - c[1], s.a[0] - c[0]);
+    const t1 = Math.atan2(s.b[1] - c[1], s.b[0] - c[0]);
+    let sweep = s.ccw === false ? -((((t0 - t1) % TAU) + TAU) % TAU) : (((t1 - t0) % TAU) + TAU) % TAU;
+    if (Math.abs(sweep) < 1e-12) sweep = s.ccw === false ? -TAU : TAU;
+    for (let i = 0; i <= 64; i++) {
+      const t = t0 + (sweep * i) / 64;
+      at(c[0] + r * Math.cos(t), c[1] + r * Math.sin(t));
+    }
+  };
+  if (cutter.shape === 'circle') {
+    for (let i = 0; i <= 64; i++) {
+      const t = (TAU * i) / 64;
+      at(cutter.c[0] + cutter.r * Math.cos(t), cutter.c[1] + cutter.r * Math.sin(t));
+    }
+  } else if (cutter.shape === 'poly') {
+    cutter.pts.forEach((p, i) => line(p, cutter.pts[(i + 1) % cutter.pts.length]));
+  } else {
+    for (const s of cutter.segs) (s.kind === 'line' ? line(s.a, s.b) : arc(s));
+  }
+  return { lo, hi };
+}
+
+// The whole scheme rests on this: a material boundary is a cylinder that is
+// solid all the way round, so two bodies meet on a complete annular face. Web
+// patterns are laid out inside [rHub + 0.5, rRimIn - 0.5], dovetails sit
+// inside a band, the tire tool stops at the rim ring, bolt holes clear the hub
+// ring — but no one place says so. This does, on the finished geometry.
+test('nothing the planner cuts ever crosses a material boundary', () => {
+  const problems = [];
+  let checked = 0;
+  for (const diameter of [80, 120, 200, 355.6, 700]) {
+    for (const infill of ['solid', 'spokes', 'honeycomb', 'flexweb', 'lattice', 'auxetic', 'graded', 'voronoi']) {
+      for (const tread of ['slick', 'lugged', 'ribbed', 'chevron']) {
+        for (const type of ['keyed', 'plain', 'hex', 'dbore', 'bolt']) {
+          for (const shape of ['flat', 'crowned', 'round']) {
+            const plan = planWheel({
+              diameter,
+              width: 40,
+              infill,
+              tread,
+              treadAngle: 30,
+              profile: { shape },
+              bore: { type },
+              materials: { tread: 'tpu', web: 'petg', hub: 'abs' },
+            });
+            const what = [diameter, infill, tread, type, shape].join('/');
+            checked++;
+            // Two exceptions, both understood.
+            //
+            // A bolt circle can be asked for wider than a wheel has room for,
+            // and on one whose hub ring has already swallowed the web band the
+            // holes then reach past the only boundary there is. Allowed — the
+            // bodies still tile the piece exactly — but only when the plan
+            // says so out loud.
+            //
+            // A flex-web slot's corners are offset perpendicular to a *curved*
+            // centreline, so a corner sits further from the axle than the
+            // centreline's end does and the slot reaches a little way into the
+            // rim band. That is how the flex web has always been laid out; the
+            // bound here is what keeps it from being a licence.
+            const declared = plan.warnings.some((w) => /hub features reach/.test(w));
+            const hubFeature = (id) => id === 'bore' || id === 'keyway' || /^bolt\d*$/.test(id);
+            const FLEX_SLACK = 2;
+            for (const b of plan.zones.slice(1).map((z) => z.r0)) {
+              for (const u of plan.uniquePieces) {
+                for (const c of u.cutters) {
+                  const { lo, hi } = radiusRange(c);
+                  if (lo >= b - 1e-9 || hi <= b + 1e-9) continue;
+                  if (hubFeature(c.id) && declared) continue;
+                  if (infill === 'flexweb' && /^web/.test(c.id) && hi < b + FLEX_SLACK) continue;
+                  problems.push(`${what}: cutter ${c.id} spans ${lo.toFixed(2)}-${hi.toFixed(2)}, across the boundary at ${b}`);
+                }
+              }
+              // A dovetail straddling a boundary would come out half one
+              // filament and half the other. A tenon is not a laminate.
+              for (const j of plan.joints) {
+                const reach = j.hh + plan.jointClearance;
+                if (j.r - reach < b - 1e-9 && j.r + reach > b + 1e-9) {
+                  problems.push(`${what}: ${j.tag} dovetail at r=${j.r} +/-${reach.toFixed(2)} straddles ${b}`);
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  assert.ok(checked > 500, `swept ${checked} configurations`);
+  assert.deepEqual(problems.slice(0, 5), [], `${problems.length} boundary crossings`);
+});
+
+test('one material is one body, and neighbours sharing a filament merge', () => {
+  const plain = planWheel({});
+  assert.equal(plain.multiMaterial, false);
+  assert.equal(plain.zones.length, 1);
+  assert.equal(plain.zones[0].material, 'petg');
+  assert.equal(plain.zones[0].r0, 0);
+  assert.deepEqual(plain.interfaces, []);
+
+  // Naming every zone what the wheel already is changes nothing.
+  const same = planWheel({ materials: { tread: 'petg', web: 'petg', hub: 'petg' } });
+  assert.equal(same.multiMaterial, false);
+  assert.deepEqual(same.zones.map((z) => z.keys), [['hub', 'web', 'tread']]);
+
+  const two = planWheel({ materials: { tread: 'tpu' } });
+  assert.equal(two.multiMaterial, true);
+  assert.deepEqual(two.zones.map((z) => z.key), ['hub-web', 'tread']);
+  assert.deepEqual(two.zones.map((z) => z.material), ['petg', 'tpu']);
+
+  const three = planWheel({ materials: { tread: 'tpu', web: 'petg', hub: 'abs' } });
+  assert.deepEqual(three.zones.map((z) => z.key), ['hub', 'web', 'tread']);
+  assert.deepEqual(three.materialSet, ['abs', 'petg', 'tpu']);
+});
+
+test('zones tile the wheel from the axle out and land on the band walls', () => {
+  const plan = planWheel({ materials: { tread: 'tpu', web: 'petg', hub: 'abs' } });
+  assert.equal(plan.zones[0].r0, 0);
+  for (let i = 1; i < plan.zones.length; i++) {
+    assert.equal(plan.zones[i].r0, plan.zones[i - 1].r1, 'no gap between bodies');
+  }
+  assert.equal(plan.zones[1].r0, plan.radii.rHub);
+  assert.equal(plan.zones[2].r0, plan.radii.rRimIn);
+  // The outermost body is bounded by the wheel, not by its own tool.
+  assert.ok(plan.zones[2].r1 > plan.radii.R);
+});
+
+test('an unknown filament falls back to the wheel material, not to nothing', () => {
+  const plan = planWheel({ material: 'pla', materials: { tread: 'nylon', web: '', hub: 'tpu' } });
+  assert.equal(plan.materials.tread, 'pla');
+  assert.equal(plan.materials.web, 'pla');
+  assert.equal(plan.materials.hub, 'tpu');
+});
+
+test('a web band too thin to print takes the hub filament, and says so', () => {
+  // A 30 mm wheel has no web band at all: the hub ring meets the rim band.
+  const plan = planWheel({ diameter: 30, width: 20, bore: { type: 'plain', diameter: 8 }, materials: { tread: 'tpu', web: 'pla', hub: 'abs' } });
+  assert.ok(plan.radii.rRimIn - plan.radii.rHub < 3);
+  assert.equal(plan.materials.web, 'abs');
+  assert.ok(plan.zones.every((z) => z.material !== 'pla'), 'the web filament goes unused');
+  assert.ok(plan.warnings.some((w) => /web band/i.test(w)), 'and the refusal is reported');
+});
+
+test('a weak interface is a warning, a good one is not', () => {
+  const weak = planWheel({ materials: { tread: 'tpu', web: 'pla', hub: 'pla' } });
+  assert.equal(weak.interfaces[0].level, 'weak');
+  assert.equal(weak.warnings.filter((w) => /bond|stick|grip/i.test(w)).length, 1);
+
+  const good = planWheel({ materials: { tread: 'tpu', web: 'petg', hub: 'petg' } });
+  assert.equal(good.interfaces[0].level, 'good');
+  assert.deepEqual(good.warnings.filter((w) => /bond|stick|grip/i.test(w)), []);
+});
+
+test('each dovetail gets the adhesive for the filament it is cut in', () => {
+  const plan = planWheel({ materials: { tread: 'tpu' } });
+  const byTag = Object.fromEntries(plan.joints.map((j) => [j.tag, j.material]));
+  assert.equal(byTag.rim, 'tpu', 'the rim joint lives in the tread band');
+  assert.equal(byTag.hub, 'petg');
+  assert.deepEqual(plan.glue.perJoint.map((j) => `${j.tag}:${j.material}`), ['hub:petg', 'rim:tpu']);
+  // One filament at every seam: one recommendation, exactly as before.
+  assert.equal(planWheel({}).glue.perJoint, undefined);
+});
+
+test('print settings are listed per filament once there is more than one', () => {
+  assert.equal(planWheel({}).printRec.byMaterial, undefined);
+  const plan = planWheel({ materials: { tread: 'tpu' } });
+  assert.deepEqual(plan.printRec.byMaterial.map((r) => `${r.material}/${r.walls}`), ['petg/4', 'tpu/3']);
 });

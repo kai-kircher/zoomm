@@ -29,6 +29,10 @@ const CONFIGS = [
   ['lattice-chevron-sharp', { diameter: 300, width: 50, infill: 'lattice', tread: 'lugged', lattice: { rows: 1, cornerRadius: 0 } }],
   ['auxetic-reentrant-hex', { diameter: 200, width: 40, material: 'tpu', infill: 'auxetic', tread: 'lugged', bore: { type: 'hex', hexAcrossFlats: 13 }, auxetic: { rings: 2, waist: 0.4 } }],
   ['voronoi-organic-bolt', { diameter: 180, width: 40, infill: 'voronoi', tread: 'slick', bore: { type: 'bolt', boltCount: 5, boltCircle: 70, boltHoleDia: 5.5, pilotDia: 14 }, voronoi: { seed: 7 } }],
+  // Graded rings put a wide range of cell sizes in one wheel — the smallest
+  // loops the kernel is asked to cut sit next to the largest.
+  ['graded-rings-keyed', { diameter: 355.6, width: 50, infill: 'graded', tread: 'lugged' }],
+  ['graded-swirled-diamonds', { diameter: 160, width: 45, infill: 'graded', tread: 'slick', bore: { type: 'bolt' }, graded: { cellShape: 'diamond', swirl: 30, rings: 2 } }],
   ['wagon-bolt-segmented', { diameter: 355.6, bore: { type: 'bolt', boltCount: 4, boltCircle: 60, boltHoleDia: 5.5, pilotDia: 12 } }],
   ['dbore-diamond-solid', { diameter: 200, width: 45, infill: 'solid', tread: 'diamond', bore: { type: 'dbore', diameter: 12 } }],
   ['cart-bolt-segmented', { bore: { type: 'bolt' }, infill: 'solid', tread: 'slick' }],
@@ -43,6 +47,13 @@ const CONFIGS = [
   ['crowned-lugged', { diameter: 200, width: 40, infill: 'solid', tread: 'lugged', profile: { shape: 'crowned', crownDrop: 5 } }],
   ['round-bike-tire', { diameter: 200, width: 28, infill: 'honeycomb', tread: 'chevron', treadAngle: 35, treadDepth: 2.2, profile: { shape: 'round' }, bore: { type: 'bolt', boltCount: 5, boltCircle: 60, boltHoleDia: 5, pilotDia: 12 } }],
   ['crowned-ribbed', { diameter: 160, width: 36, infill: 'solid', tread: 'ribbed', profile: { shape: 'crowned' } }],
+  // Multi-material: the piece is built exactly as above and then intersected
+  // with one annulus per filament. Three shapes of that — a segmented wheel
+  // split in two, a one-piece wheel split in three, and a lofted section, so
+  // the extra boolean meets a B-spline blank as well as a prismatic one.
+  ['dual-tpu-tread-segmented', { materials: { tread: 'tpu' } }],
+  ['triple-material-one-piece', { diameter: 200, width: 40, infill: 'honeycomb', tread: 'lugged', materials: { tread: 'tpu', web: 'petg', hub: 'abs' } }],
+  ['dual-material-chevron-loft', { diameter: 300, width: 50, infill: 'lattice', tread: 'chevron', treadAngle: 30, materials: { tread: 'tpu' } }],
 ];
 
 const runtime = Object.fromEntries(
@@ -112,14 +123,28 @@ for (const [name, cfg] of CONFIGS) {
     seconds += rows.reduce((s, p) => s + p.seconds, 0);
     const t = rows.reduce((s, p) => s + p.seconds, 0).toFixed(1);
     const cut = tireActuallyCuts(plan, rows);
+    // The kernel already refuses to write bodies that do not add back up to
+    // the piece they came from; this is the other half of that — that the
+    // split happened at all, in the shape the planner asked for.
+    const split = plan.multiMaterial
+      ? rows.every(
+          (p) =>
+            p.bodies?.length === plan.zones.length &&
+            p.bodies.every((b, i) => b.material === plan.zones[i].material)
+        )
+      : rows.every((p) => !p.bodies);
     if (bad.length) {
       failures++;
       console.log(`${head}  ✗ ${bad.length} piece(s) built an invalid B-rep`);
     } else if (cut === false) {
       failures++;
       console.log(`${head}  ✗ the tire tool removed nothing — the crown is not in the solid`);
+    } else if (!split) {
+      failures++;
+      console.log(`${head}  ✗ the material split did not produce the planned bodies`);
     } else {
-      console.log(`${head}  ✓ ${t}s, ${built.length} files`);
+      const mats = plan.multiMaterial ? `, ${plan.zones.length} bodies × ${plan.materialSet.join('+')}` : '';
+      console.log(`${head}  ✓ ${t}s, ${built.length} files${mats}`);
     }
   } catch (e) {
     failures++;

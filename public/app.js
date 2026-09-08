@@ -4,7 +4,7 @@
 import { planWheel, DEFAULTS } from '../src/lib/wheel.js';
 import { convertFormUnits, fromMm, isLengthInput } from '../src/lib/units.js';
 import { generateSource, slugFor, RUNTIME_FILES } from '../src/lib/occgen.js';
-import { createPreview } from './preview.js';
+import { createPreview, MATERIAL_COLORS, cssColor } from './preview.js';
 import { enableScrub } from './scrub.js';
 
 const $ = (id) => document.getElementById(id);
@@ -51,6 +51,12 @@ const PRESETS = {
     bore: { type: 'hex', hexAcrossFlats: 13 },
     auxetic: { rings: 2, wall: 2.6, waist: 0.4, cornerRadius: 1.2 },
   },
+  graded: {
+    units: 'mm', diameter: 200, width: 45, material: 'petg', infill: 'graded',
+    tread: 'ribbed', treadDepth: 2.5,
+    bore: { type: 'bolt', boltCount: 5, boltCircle: 80, boltHoleDia: 5.5, pilotDia: 30 },
+    graded: { rings: 3, wall: 2.6, cellShape: 'hex', grade: 1, swirl: 0, cornerRadius: 1.6 },
+  },
   organic: {
     units: 'mm', diameter: 180, width: 40, material: 'petg', infill: 'voronoi',
     tread: 'slick', treadDepth: 2,
@@ -61,6 +67,13 @@ const PRESETS = {
     units: 'mm', diameter: 100, width: 25, material: 'pla', infill: 'spokes',
     tread: 'ribbed', treadDepth: 2,
     bore: { type: 'plain', diameter: 8 },
+  },
+  dual: {
+    units: 'mm', diameter: 200, width: 40, material: 'petg', infill: 'honeycomb',
+    materials: { tread: 'tpu', web: 'petg', hub: 'petg' },
+    tread: 'lugged', treadDepth: 3,
+    bore: { type: 'bolt', boltCount: 4, boltCircle: 60, boltHoleDia: 5.5, pilotDia: 12 },
+    honeycomb: { cellSize: 12, wall: 2.4 },
   },
   bike: {
     units: 'mm', diameter: 200, width: 28, material: 'tpu', infill: 'honeycomb',
@@ -77,6 +90,13 @@ function gather() {
     diameter: $('diameter').value,
     width: $('width').value,
     material: $('material').value,
+    // Off, the zone selects mirror the wheel's material (see
+    // syncZoneMaterials) — but sending nothing says the same thing to the
+    // planner more plainly, and keeps a single-material plan single-material
+    // even if a stale value is sitting in a hidden select.
+    materials: $('multiMaterial').checked
+      ? { tread: $('matTread').value, web: $('matWeb').value, hub: $('matHub').value }
+      : {},
     infill: $('infill').value,
     spokeCount: $('spokeCount').value,
     tread: $('tread').value,
@@ -143,6 +163,15 @@ const STYLE_FIELDS = {
     waist: { id: 'axWaist' },
     cornerRadius: { id: 'axCornerRadius' },
   },
+  graded: {
+    rings: { id: 'grRings' },
+    cells: { id: 'grCells' },
+    wall: { id: 'grWall' },
+    cellShape: { id: 'grCellShape' },
+    grade: { id: 'grGrade' },
+    swirl: { id: 'grSwirl' },
+    cornerRadius: { id: 'grCornerRadius' },
+  },
   voronoi: {
     cells: { id: 'voCells' },
     wall: { id: 'voWall' },
@@ -167,6 +196,17 @@ function setUnits(units) {
   formUnits = units;
 }
 
+// The three per-zone material selects, keyed by the planner's zone name.
+const ZONE_SELECTS = { tread: 'matTread', web: 'matWeb', hub: 'matHub' };
+
+// While the wheel is single-material the zone selects track it, so ticking the
+// box shows three selects that already say what the wheel is made of and the
+// design does not jump at the moment of ticking.
+function syncZoneMaterials() {
+  if ($('multiMaterial').checked) return;
+  for (const id of Object.values(ZONE_SELECTS)) $(id).value = $('material').value;
+}
+
 function applyPreset(p) {
   // Switch units first: that converts everything the form already holds, so
   // the printer envelope and the two clearances — user settings no preset
@@ -178,6 +218,13 @@ function applyPreset(p) {
     infill: p.infill, spokeCount: p.spokeCount ?? 0, tread: p.tread, treadDepth: p.treadDepth,
   };
   for (const [k, v] of Object.entries(flat)) if ($(k) && v !== undefined) $(k).value = v;
+  // A preset that says nothing about zones is a single-material wheel, and its
+  // zone selects fall back to its material — so switching presets never leaves
+  // the last one's TPU tread behind.
+  $('multiMaterial').checked = !!p.materials;
+  for (const [zone, id] of Object.entries(ZONE_SELECTS)) {
+    $(id).value = p.materials?.[zone] || p.material;
+  }
   $('boreType').value = p.bore.type;
   const boreMap = {
     diameter: 'boreDiameter', keyWidth: 'keyWidth', keyDepth: 'keyDepth',
@@ -212,10 +259,13 @@ function applyPreset(p) {
 
 function updateVisibility() {
   // "field:a,b" — or several such conditions joined by ";", all must hold.
+  // A checkbox has no useful `value`, so it answers with "true"/"false".
   document.querySelectorAll('[data-show]').forEach((el) => {
     const show = el.dataset.show.split(';').every((cond) => {
       const [field, vals] = cond.split(':');
-      return vals.split(',').includes($(field).value);
+      const el2 = $(field);
+      const v = el2.type === 'checkbox' ? String(el2.checked) : el2.value;
+      return vals.split(',').includes(v);
     });
     el.classList.toggle('hidden', !show);
   });
@@ -257,6 +307,7 @@ function renderOutput(plan) {
     <div class="big">Ø${mm1(p.diameter)} × ${mm1(p.width)} mm — ${segTxt}</div>
     <div class="kv"><span>Piece footprint</span><span>${plan.bbox.w} × ${plan.bbox.d} × ${plan.W} mm</span></div>
     <div class="kv"><span>Usable bed</span><span>${plan.fit.usable.x} × ${plan.fit.usable.y} × ${plan.fit.usable.z} mm</span></div>
+    ${materialTxt(plan)}
     ${jointTxt}
     <div class="kv"><span>Web</span><span>${describeInfill(plan.infillInfo)}</span></div>
     <div class="kv"><span>Tread</span><span>${describeTread(plan.treadInfo)}</span></div>
@@ -273,13 +324,53 @@ function renderOutput(plan) {
     plan.warnings.map((w) => `<div class="warn">⚠ ${w}</div>`).join('') +
     plan.notes.map((n) => `<div class="note">ℹ ${n}</div>`).join('');
 
+  // Adhesive, then the printer settings, then the one thing a multi-material
+  // wheel adds: where two filaments meet and whether they will hold.
+  const perJoint = (plan.glue.perJoint || [])
+    .map(
+      (j) =>
+        `<p><b>${j.tag} dovetail — ${j.material.toUpperCase()}:</b> ${j.name}. ${j.tips}</p>`
+    )
+    .join('');
+  const printLines = (plan.printRec.byMaterial || [plan.printRec])
+    .map(
+      (r) =>
+        `<p><b>Print${plan.printRec.byMaterial ? ` — ${r.material.toUpperCase()}` : ''}:</b> ` +
+        `${r.walls} walls, ${r.infillPct}% ${r.infillPattern}. ${r.note}</p>`
+    )
+    .join('');
+  const VERDICT = { weld: 'welds', good: 'bonds well', weak: 'bonds poorly' };
+  const interfaces = plan.interfaces.length
+    ? `<div class="g-sub">Where the materials meet</div>` +
+      plan.interfaces
+        .map(
+          (f) =>
+            `<p><b>${f.inner.toUpperCase()} → ${f.outer.toUpperCase()}</b> at Ø${mm1(f.r * 2)} mm — ` +
+            `${VERDICT[f.level]}. ${f.why}</p>`
+        )
+        .join('')
+    : '';
   $('glue').innerHTML = `
     <div class="g-name">${plan.glue.name}</div>
     <p>${plan.glue.why}</p>
-    <p><b>How:</b> ${plan.glue.tips}</p>
-    <p><b>Print:</b> ${plan.printRec.walls} walls, ${plan.printRec.infillPct}% ${plan.printRec.infillPattern}. ${plan.printRec.note}</p>`;
+    ${perJoint || `<p><b>How:</b> ${plan.glue.tips}</p>`}
+    ${printLines}
+    ${interfaces}`;
 
   renderFileLinks();
+}
+
+// One swatch per body, in the colours the preview paints them.
+function materialTxt(plan) {
+  if (!plan.multiMaterial) return '';
+  const swatches = plan.zones
+    .map(
+      (z) =>
+        `<span><i style="background:${cssColor(MATERIAL_COLORS[z.material])}"></i>` +
+        `${z.key} ${z.material.toUpperCase()}</span>`
+    )
+    .join('');
+  return `<div class="kv"><span>Materials</span><span class="mats">${swatches}</span></div>`;
 }
 
 function describeInfill(i) {
@@ -294,6 +385,10 @@ function describeInfill(i) {
   }
   if (i.style === 'auxetic') {
     return `auxetic — ${i.rings} ring${i.rings === 1 ? '' : 's'}, ${i.cellsPerSegment}/segment, ${i.cellWidth}×${i.cellHeight} mm cells, ${i.wall} mm wall`;
+  }
+  if (i.style === 'graded') {
+    const lean = i.swirl ? `, ${Math.abs(i.swirl)}° swirl` : '';
+    return `graded rings — ${i.rings} ring${i.rings === 1 ? '' : 's'}, ${i.cellsPerSegment}/segment, ${i.cellShape} cells ${i.innerCell} → ${i.outerCell} mm wide, ${i.wall} mm wall${lean}`;
   }
   if (i.style === 'voronoi') {
     return `voronoi — ${i.cellsPerSegment} cells/segment, ${i.wall} mm wall, seed ${i.seed}`;
@@ -411,6 +506,7 @@ $('dlStl').addEventListener('click', async () => {
 document.querySelectorAll('#config input, #config select').forEach((el) => {
   el.addEventListener('input', () => {
     if (el.id === 'units') setUnits(el.value);
+    syncZoneMaterials();
     updateVisibility();
     replan();
   });
@@ -465,6 +561,7 @@ document.addEventListener('click', (e) => {
 });
 refreshHealth();
 
+syncZoneMaterials();
 updateVisibility();
 createPreview($('stage')).then((pv) => {
   preview = pv;

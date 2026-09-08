@@ -61,8 +61,16 @@ Response shape (abridged):
   "W": 50,                      // wheel width = piece height when printed
   "N": 6,                       // segments
   "segAngle": 60,
-  "joints": [ { "r": 30.6, "hn": 2.4, "hh": 3.9, "d": 4.5, "tag": "hub" }, … ],
+  "joints": [ { "r": 30.6, "hn": 2.4, "hh": 3.9, "d": 4.5, "tag": "hub", "material": "petg" }, … ],
   "jointClearance": 0.15,
+  "multiMaterial": true,        // more than one filament, so pieces split into bodies
+  "materials":  { "hub": "petg", "web": "petg", "tread": "tpu" },
+  "materialSet": ["petg", "tpu"],
+  "zones": [                    // one body per filament, innermost first, tiling [0, R+2]
+    { "key": "hub-web", "keys": ["hub","web"], "material": "petg", "r0": 0,     "r1": 163.3, "seam": 210 },
+    { "key": "tread",   "keys": ["tread"],     "material": "tpu",  "r0": 163.3, "r1": 179.8, "seam": 210 }
+  ],
+  "interfaces": [ { "r": 163.3, "inner": "petg", "outer": "tpu", "level": "good", "why": "…" } ],
   "outline": { "kind": "sector", "segs": [ … ], "interior": [x, y] },
   "pieces": [ { "k": 0, "label": "A" }, { "k": 1, "label": "B" }, … ],
   "uniquePieces": [
@@ -75,8 +83,10 @@ Response shape (abridged):
   "sections":   [ { "z": 0, "kind": "sector", "segs": [ … ], "interior": [x, y] } ],
   "bbox": { "w": 178.5, "d": 146, "rotForPrint": 60 },
   "fit":  { "usable": {"x":210,"y":210,"z":250}, "wholeFits": false, "pieceFits": true },
-  "glue": { "name": "…", "why": "…", "tips": "…" },
-  "printRec": { "orientation": "…", "walls": 4, "infillPct": 30, "infillPattern": "gyroid", "note": "…" },
+  "glue": { "name": "…", "why": "…", "tips": "…",
+            "perJoint": [ { "tag": "hub", "material": "petg", "name": "…", "tips": "…" }, … ] },
+  "printRec": { "orientation": "…", "walls": 4, "infillPct": 30, "infillPattern": "gyroid", "note": "…",
+                "byMaterial": [ { "material": "petg", "walls": 4, … }, … ] },
   "warnings": [], "notes": []
 }
 ```
@@ -102,6 +112,19 @@ Geometry conventions:
   plus a `z0`/`z1` range. Only cuts that stop partway through the width are
   cutters now — everything full-depth is a loop in the section sketch. Cutters
   that do span the width overshoot the part by 1 mm each end.
+- `zones` is the wheel cut into one body per filament, by cylinders concentric
+  with the axle. They tile the piece: the first starts at `r0: 0`, each
+  `r0` equals its predecessor's `r1`, and the last finishes past the tread — so
+  neighbouring bodies share their boundary face exactly. Bands naming the same
+  filament are merged, which is why `key` can read `hub-web`. A
+  single-material wheel has exactly one zone and `multiMaterial: false`, and
+  nothing downstream splits it. `seam` is where the tool's circle seam is
+  parked, away from the piece's radial faces.
+- `interfaces` is one entry per place two filaments meet, with `level` one of
+  `weld` (same filament), `good` or `weak`. A `weak` one is also a warning.
+- `glue.perJoint` and `printRec.byMaterial` appear only when a wheel needs
+  more than one answer: seams in two filaments need two adhesives, and two
+  filaments need two sets of print settings.
 
 `warnings` are things the caller should act on; `notes` are decisions the
 planner made. Both are plain strings, already user-readable.
@@ -156,6 +179,14 @@ curl -s localhost:3000/api/source.zip -H 'content-type: application/json' \
 Generates the bundle, builds every unique piece with OpenCascade, and returns a
 ZIP of the solids plus the assembly guide and manifest.
 
+A single-material piece is one solid and comes back as `piece-A.stl` /
+`piece-A.step`. A multi-material one is split into a body per filament after it
+is built, and comes back as `piece-A-<zone>-<filament>.stl` — one set per
+piece, in the same coordinate frame, sharing their boundary faces exactly, so
+the set loads into a slicer as the parts of one object. The manifest's
+`pieces[].bodies` lists them, and the kernel refuses to write bodies that do
+not add back up to the piece they came from.
+
 ```sh
 curl -s localhost:3000/api/export/stl -H 'content-type: application/json'   -d '{"diameter":120,"width":30}' -o wheel-stl.zip
 ```
@@ -198,8 +229,8 @@ Errors are JSON with a machine-readable `code` and a human `how`:
 }
 ```
 
-**Timing.** The build is synchronous, local, and fast: across the 19-configuration
-matrix in `scripts/validate-occ.js`, pieces take roughly 0.1–2.5 s each, and a
+**Timing.** The build is synchronous, local, and fast: across the 24-configuration
+matrix in `scripts/validate-occ.js`, pieces take roughly 0.1–6 s each, and a
 whole wheel — every unique piece, in both formats — lands in a few seconds.
 Lofted cross-sections are at the slow end of that range, not a different order
 of magnitude. A 60 s client timeout is generous; the server's own ceiling is
@@ -217,8 +248,13 @@ named by `units` (`"mm"` default, `"in"` accepted and converted).
   "units": "mm",
   "diameter": 355.6,            // 30–1500 mm
   "width": 50,                  // 6–400 mm
-  "material": "petg",           // pla | petg | abs | tpu
-  "infill": "spokes",           // solid | spokes | honeycomb | flexweb | lattice | auxetic | voronoi
+  "material": "petg",           // pla | petg | abs | tpu — the whole wheel, unless:
+  "materials": {                // multi-material: one filament per radial band
+    "tread": "",                //   the tread and the rim ring under it
+    "web": "",                  //   the spokes / airless web
+    "hub": ""                   //   the hub ring around the bore
+  },                            // "" (or absent, or unknown) follows `material`
+  "infill": "spokes",           // solid | spokes | honeycomb | flexweb | lattice | auxetic | graded | voronoi
   "spokeCount": 0,              // 0 = auto; snapped to a multiple of the segment count
   "tread": "lugged",            // slick | ribbed | lugged | diamond | chevron | angled
   "treadDepth": 3.5,            // 0.8 mm – 6 % of diameter
@@ -239,6 +275,7 @@ named by `units` (`"mm"` default, `"in"` accepted and converted).
                  "cellShape": "hex", "cornerRadius": 0, "maxCells": 64 },
   "lattice":   { "rows": 0, "struts": 0, "strutWidth": 4, "cornerRadius": 1.5 },
   "auxetic":   { "rings": 0, "cellSize": 0, "wall": 3, "waist": 0.45, "cornerRadius": 1.2 },
+  "graded":    { "rings": 0, "cells": 0, "wall": 2.6, "cellShape": "hex", "grade": 1, "swirl": 0, "cornerRadius": 1.2 },
   "voronoi":   { "cells": 0, "wall": 3, "seed": 1, "cornerRadius": 1.2 },
   "printer": { "x": 220, "y": 220, "z": 250, "margin": 10 },
   "joint": { "clearance": 0.15 },   // 0.05–0.6 mm per side

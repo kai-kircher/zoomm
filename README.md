@@ -22,15 +22,18 @@ and the glue-up instructions.
 
 - **Configure the wheel**: diameter, width, material (PLA/PETG/ABS/TPU), and hub interface (keyed
   shaft, plain, hex, D-bore, or bolt circle with pilot).
+- **Give each part its own filament**: a TPU tread on a PETG core, a stiffer hub than web. Each
+  piece then exports as one file per material, split on cylinders that are solid all the way
+  round, ready to load into a slicer as the parts of a single object.
 - **Pick a tread**: lugged (straight bars), angled, chevron / V-bar, ribbed, diamond, or slick —
   with bar count, bar angle, rib count and depth all settable.
 - **Pick a cross-section**: flat cylindrical, crowned by a settable drop, or a full round
   bicycle-tire section — cut as an exact arc of the section circle, not approximated. The tread
   rides the curve, so bars fade out towards the shoulders the way a moulded tire's do.
-- **Pick a web**: solid, spokes, or one of the four [airless patterns](#the-airless-webs) —
-  honeycomb, interlaced lattice, auxetic re-entrant, or voronoi. Each carries its own parameter
-  group (cell size, wall, orientation, corner rounding…) and each guarantees a minimum wall
-  everywhere, by construction.
+- **Pick a web**: solid, spokes, or one of the five [airless patterns](#the-airless-webs) —
+  honeycomb, interlaced lattice, auxetic re-entrant, graded rings, or voronoi. Each carries its
+  own parameter group (cell size, wall, orientation, corner rounding…) and each guarantees a
+  minimum wall everywhere, by construction.
 - **Give it your print envelope**: bed X/Y, height Z, edge margin.
 - **It plans the build**: picks the smallest segment count whose pieces fit the bed, sizes
   slide-together dovetails into the rim and hub rings, keeps structural webs clear of the seams,
@@ -71,8 +74,8 @@ you download the source bundle and run `pip install cadquery-ocp && python build
 which is the same code, on the same files, that the server would have run.
 
 ```sh
-npm test           # 134 unit tests: chunking math, joints, dedupe, piece profiles, every web pattern's wall and overlap guarantees, emitted-bundle geometry
-npm run validate   # regenerates a 19-config matrix and builds every piece through the real kernel
+npm test           # 194 unit tests: chunking math, joints, dedupe, piece profiles, every web pattern's wall and overlap guarantees, material-zone boundaries, emitted-bundle geometry
+npm run validate   # regenerates a 24-config matrix and builds every piece through the real kernel
 ```
 
 ## Documentation
@@ -98,7 +101,8 @@ npm run validate   # regenerates a 19-config matrix and builds every piece throu
                       ├─ tread + tire cross-section (bar notches and the crown arc are
                       │  drawn into the piece profile itself, one profile per z level;
                       │  counts snap to multiples of N so seams land between bars)
-                      └─ per-piece hub features + signature dedupe (keyway/D-flat/bolt windows)
+                      ├─ per-piece hub features + signature dedupe (keyway/D-flat/bolt windows)
+                      └─ material zones: which radial bands get which filament
                       │
         ┌─────────────┴──────────────┐
         ▼                            ▼
@@ -108,6 +112,7 @@ npm run validate   # regenerates a 19-config matrix and builds every piece throu
                                      │
                                      ▼
                           OpenCascade (python build.py .) ──► STL + STEP
+                          (one file per piece, or one per filament)
 ```
 
 One geometry plan feeds both the preview and the code generator, so what you see is what the
@@ -147,20 +152,22 @@ segment, so a web never costs you a unique piece and never leaves a joint half-c
 ## The airless webs
 
 Search "airless tire" and you get four looks: honeycomb, criss-crossing curved struts, chevron
-trusses, and the auxetic lattices out of the research papers — plus the organic voronoi webs the
-3D-printing crowd likes. Wheelwright models all of them. Pick a web style in the sidebar and its
-own parameter group appears; every length follows the units selector.
+trusses, and the auxetic lattices out of the research papers — plus the rings of cells that grow
+towards the rim on most moulded ones, and the organic voronoi webs the 3D-printing crowd likes.
+Wheelwright models all of them. Pick a web style in the sidebar and its own parameter group
+appears; every length follows the units selector.
 
 | Style | The look | Knobs |
 |---|---|---|
 | `honeycomb` | Hex cells on a true hex lattice — the Polaris/Resilient NPT look. | [below](#honeycomb) |
 | `lattice` | Two mirrored families of struts crossing in an X, diamonds slung between them. One row degenerates to a chevron/V-truss. | [below](#interlaced-lattice) |
 | `auxetic` | Re-entrant bow-tie cells in a brick bond: the web pulls *inward* when you squeeze it. | [below](#auxetic-re-entrant) |
+| `graded` | Concentric rings of hex, rectangular or diamond cells that grow with the radius — small at the hub, large at the rim. Lean them for a turbine web. | [below](#graded-rings) |
 | `voronoi` | Organic irregular cells from a seeded tessellation. | [below](#voronoi) |
 
 ### How the curved ones are built
 
-Honeycomb is a straight lattice stamped onto an annulus. The other three curve with the wheel, and
+Honeycomb is a straight lattice stamped onto an annulus. The other four curve with the wheel, and
 they all get there the same way — by unrolling the web band into a rectangle, drawing the pattern
 there in plain straight-line geometry, and mapping it back:
 
@@ -185,7 +192,7 @@ number you typed the **minimum** material anywhere along that wall. Two conseque
   boundary that eats into the wall, so the chord length is held under `√(8·r·sag)` and every wall
   carries the leftover sag as an allowance.
 
-The tests measure all of it on the finished millimetre geometry — every pair of cells in 31
+The tests measure all of it on the finished millimetre geometry — every pair of cells in 50
 configurations, checked for overlap, nesting, self-crossing loops, band containment, seam
 clearance, and the wall actually left between them.
 
@@ -228,6 +235,36 @@ brick-staggered ring to ring, all sharing one angular pitch so the columns line 
 | `wall` | `3` mm | Material between neighbouring cells — exactly this radially, and this at the tightest point of every ring wall. |
 | `waist` | `0.45` | Waist width ÷ cell width. Lower pinches harder (more auxetic); `0.9` is nearly a plain hex. |
 | `cornerRadius` | `1.2` mm | Fillets the corners, waist included — a rounded waist bows into the wall, so the bow is capped at the slack that corner has. |
+
+### Graded rings
+
+The regular airless-tire web: concentric rings of cells that grow with the radius — small around
+the hub, large at the rim — which is what most moulded airless tires and robot wheels actually
+look like. It is the deliberate opposite of the voronoi: nothing here is random.
+
+One angular pitch is shared by the whole web, so a cell is exactly as wide as its own radius makes
+it, and `grade` spaces the ring boundaries geometrically so the *height* grows with the width —
+each cell a scaled copy of the one inside it. Rings brick-stagger, so the radial walls of one ring
+sit over the middle of the cells in the next.
+
+Each ring then takes the whole number of cells nearest that shared pitch and stretches to fill its
+own run. It has to: the seam keep-out is a fixed number of millimetres, so it costs a ring near the
+hub several times as many degrees as one at the rim, and without the stretch every inner ring would
+leave most of a cell's width standing solid beside the joint.
+
+| Option | Default | What it does |
+|---|---|---|
+| `rings` | `0` (auto) | Cell rings across the band. Auto takes ~26 mm of band per ring, and more when grading asks for it — a band spanning a wide range of radii needs the extra rings to keep the step from one to the next under ~1.4×. Rings whose cells would come out unprintably shallow are dropped. |
+| `cells` | `0` (auto) | Cells around the whole wheel, at the shared pitch. Auto sizes them square at the middle ring. |
+| `wall` | `2.6` mm | Material between neighbouring cells — exactly this radially, and this at the tightest point of every ring wall. |
+| `cellShape` | `hex` | `hex` narrows the cell towards its two flat ends; `rect` keeps the sides straight all the way; `diamond` pulls the ends to a point, leaving a triangulated truss between them. |
+| `grade` | `1` | How the rings are spaced. `1` makes each ring's height proportional to its radius, so cells grow in both directions at once; `0` gives every ring the same height and cells widen only across. Anything between blends the two. |
+| `swirl` | `0`° | Leans every cell off radial by that many degrees, measured on the wheel — a turbine web. It is a shear of the chart, so the walls are untouched; each ring simply carries fewer cells, since the lean has to clear the seams too. |
+| `cornerRadius` | `1.2` mm | Fillets the cell corners. Every corner is convex, so this only ever hands material back. |
+
+Cells narrower than 3 mm are dropped rather than cut — on a wheel with a small hub and a big rim
+the innermost ring can grade its way down to noise, and a hole a nozzle can barely draw is not
+worth a boolean.
 
 ### Voronoi
 
@@ -289,9 +326,85 @@ centreline and fade out towards the shoulders exactly as a moulded tire's do. Th
 so a rim band and a web always survive underneath it; ask for more and you get a warning and the
 deepest section the wheel can actually give up.
 
+## Multi-material: a soft tread on a rigid core
+
+Tick **Multi-material** and the one material select becomes three — tread, web, hub. Anything you
+leave alone follows the wheel's material, so a single-material wheel is still the default and is
+emitted exactly as it always was: one solid, one file per piece.
+
+The split lines are the two cylinders that separate the wheel's bands:
+
+```
+  0        bore        hub ring        web band          rim ring   tread   R
+  ├──────────┼─────────────┼───────────────┼────────────────┼─────────┤
+                           ↑                                ↑
+                       hub │ web                        web │ tread
+                         rHub                            rRimIn
+```
+
+Those two and no others, because a material boundary has to be **solid all the way round**: every
+web pattern is laid out inside `[rHub + 0.5, rRimIn − 0.5]`, no dovetail reaches either line, and
+the tire tool stops at the rim ring — so the two bodies meet on a complete annular face rather
+than on something the web has holes in. `rRimIn` in particular keeps the whole rim ring with the
+tread, so a soft tread gets a sidewall and its own dovetails instead of a 3 mm skin. (The obvious
+alternative — the bar-window floor at `R − treadEff` — is a surface the piece profile already lies
+on, and a boolean asked to cut exactly where the body already ends is the one that quietly does
+nothing.)
+
+Neighbouring bands that name the same filament are merged, so "TPU tread, PETG web, PETG hub" is
+**two** bodies and not three: one file per thing you actually print.
+
+```
+piece-A-hub-web-petg.stl     piece-A-tread-tpu.stl
+piece-A-hub-web-petg.step    piece-A-tread-tpu.step
+```
+
+The bodies **share their boundary cylinder exactly** — no gap, no overlap — which is what a slicer
+wants from the parts of one object. Select the files of one piece, import them together, say yes
+to *load as a single object with multiple parts*, and assign a filament to each part. The
+generated `ASSEMBLY.md` carries that as a checklist, with the band diameters and the filament for
+each.
+
+The kernel does the split as one intersection per body against an annulus, then **checks the
+bodies add back up to the piece they came from** and refuses to write them if they do not. That
+check is there because this is a family of operations that fails quietly: an intersection whose
+tool misses returns nothing, and one whose tool seam lands in the plane of a face of the body can
+return the whole body — both of them valid, watertight, wheel-shaped solids. A volume that is
+suddenly 3× or 0× is not.
+
+### Which filaments actually stick to each other
+
+The interface is a plain cylinder, so it carries the load in shear: everything the tread does to
+the ground it does through it. It is as strong as the weld between the two filaments and no
+stronger, which matters more here than on a decorative two-colour print. Wheelwright says so up
+front rather than letting you find out on a hill:
+
+| Pairing | Verdict |
+|---|---|
+| Same filament | Welds — an ordinary layer bond. |
+| PETG + TPU | Bonds well. The pairing to reach for. |
+| PLA + TPU | Weak — TPU grips PLA far more weakly than PETG. |
+| PLA + PETG | Weak — PETG is what people put *under* PLA supports so they come away clean. |
+| ABS + anything else | Weak, and the two want different chamber temperatures. |
+
+A weak pairing is a warning in the plan, in the panel, and in `ASSEMBLY.md`.
+
+Two more things the app tells you rather than hides:
+
+- **Every seam is a separate glue-up.** A dovetail only ever joins a piece to its own kind, so the
+  rim joint of a TPU-tread wheel is TPU-to-TPU and its hub joint is PETG-to-PETG — two different
+  adhesives, listed per joint.
+- **A single-nozzle machine will purge a lot.** The bodies are rings and the piece prints lying
+  flat, so *every layer crosses every one of them*: an AMS or MMU changes filament at least once
+  per layer — on a 50 mm wide wheel that is roughly 250 changes per body boundary — and purges
+  each time. Independent tool heads make it nearly free; one nozzle does not. The number is in
+  `ASSEMBLY.md` for your wheel.
+
 ## Adhesive guidance (the flexible-glue question)
 
-The app recommends per material, and bakes it into the generated `ASSEMBLY.md`:
+This is about the **seams between segments**, which is a different question from the interface
+between two filaments above. The app recommends per material — per *joint*, on a multi-material
+wheel — and bakes it into the generated `ASSEMBLY.md`:
 
 - **TPU** — flexible contact adhesive (E6000 / Shoe Goo class); rigid glue lines crack on a
   flexing tire.
@@ -373,8 +486,9 @@ took ~80 s, busier wheels came back `Batch edit result is not valid` or dropped 
 connection, and no boolean would touch an operand with a curved face — so a crown could never be
 cut, only lofted. Every full-depth cut had to be folded back into the profile as another sketch
 loop to keep the tool count down. OpenCascade has none of those limits, so all of that machinery
-went away and every cut is just a prism again. The 19-configuration matrix builds **19/19, 28
-pieces, 36.6 s of kernel time**, against 14/19 and 85–146 s per piece before. The failure modes
+went away and every cut is just a prism again. On the 19 configurations the two backends were
+compared over, OpenCascade built **19/19, 28 pieces, 36.6 s of kernel time**, against 14/19 and
+85–146 s per piece before. The failure modes
 that shaped the old design are catalogued in
 [docs/zoo-api-notes.md](docs/zoo-api-notes.md), which is now a historical record.
 
@@ -398,7 +512,7 @@ Everything the UI does is plain JSON over HTTP:
 | `POST /api/plan` | Full geometry plan (segments, joints, warnings, per-piece cutters) |
 | `POST /api/source` | Generated files as JSON |
 | `POST /api/source.zip` | Source bundle download (self-building) |
-| `POST /api/export/stl` | STL and/or STEP built by OpenCascade — `?formats=stl,step`, both by default (503 + instructions if the kernel is missing) |
+| `POST /api/export/stl` | STL and/or STEP built by OpenCascade — `?formats=stl,step`, both by default (503 + instructions if the kernel is missing). One file per piece, or one per filament on a multi-material wheel |
 | `GET /api/health` | Whether the geometry kernel is installed, and which interpreter has it |
 
 Request body = the same parameter object the form produces (all fields optional; see
@@ -418,7 +532,7 @@ src/lib/zip.js                dependency-free ZIP writer
 src/lib/env.js                dependency-free .env / .env.local loader
 public/                       UI (vanilla JS + vendored three.js, 2D canvas fallback)
 scripts/setup-occ.mjs         creates ./bin/occ-venv with OpenCascade installed
-scripts/validate-occ.js       builds a 19-config matrix through the real kernel
+scripts/validate-occ.js       builds a 24-config matrix through the real kernel
 test/                         node:test suite
 ```
 
@@ -452,9 +566,15 @@ test/                         node:test suite
   handles it, but it is a real second runtime next to Node. On Windows, keep the venv path
   short: OpenCascade's DLLs hit `MAX_PATH` under a deep checkout, and the setup script warns
   before it spends the download.
-- Wishlist: 3MF export (STL and STEP are in), mass/inertia from the B-rep — OpenCascade already
-  computes the volume the validator prints — chamfered joint lead-ins, per-piece print-time
-  estimates.
+- Multi-material bodies **share their boundary exactly**, which is right for printing them
+  together and wrong for printing them apart: there is no fit clearance to press a separately
+  printed tread onto a core with, and no interlock to carry torque across a weak interface. The
+  interface is a plain cylinder, so a bad filament pairing is warned about rather than reinforced.
+  A clearance-fit variant and a keyed interface are the fixes; neither is in yet.
+- Wishlist: 3MF export (STL and STEP are in) — it would carry the per-part filament assignment
+  that today's separate STLs leave you to make in the slicer — mass/inertia from the B-rep, since
+  OpenCascade already computes the volume the validator prints, chamfered joint lead-ins, and
+  per-piece print-time estimates.
 
 ## License
 

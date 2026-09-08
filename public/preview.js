@@ -312,6 +312,184 @@ const signedArea = (pts) => {
   return a / 2;
 };
 
+// How far apart two ring samples have to be before they are separate points.
+//
+// The planner's own grid. The measurement backs it up: on a crowned lugged
+// wheel the pairs a collapsed bar window leaves sit 1e-6 to 1.7e-4 mm apart
+// while every real neighbour is at least 4.5e-2 mm away — three orders of
+// clear air either side. Two things read it: the cap triangulation, which
+// tears around such a pair, and `creasedNormals`, which cannot take a
+// direction from an edge shorter than the grid its ends were rounded to.
+const MERGE = 1e-3;
+
+// Crease angle for the shaped mesh's normals.
+//
+// It has to sit above the coarsest sampling step and below the shallowest real
+// edge, and the gap is wide: the crown is sampled at most 4.5° apart (40 arc
+// levels over a half turn at worst, `tireLevels`) and the circumference at 3.75°
+// (`ARC_FULL`), while every edge the piece actually has — a rim, a groove
+// wall, a tread window, a void corner, a dovetail flank — turns by 90° or
+// more. Anything from ~10° to ~80° would do; 35° is the middle of it.
+const CREASE_DEG = 35;
+
+// Vertex normals that respect the piece's edges.
+//
+// The rings are stitched into one *indexed* mesh, so a rim vertex belongs to
+// the end cap and to the side wall, and a void's corner belongs to both walls
+// meeting there. `computeVertexNormals` averages a vertex over every face on
+// it, which rounds the shading off every hard edge the piece has: pockets read
+// as funnels instead of square holes, and each end cap picks up a fan of
+// streaks off its own rim, because earcut's long thin triangles carry the
+// tilted rim normals a long way inward. Unshaped pieces never showed it —
+// `ExtrudeGeometry` is non-indexed, so three.js already shades it flat.
+//
+// Flat shading everywhere would fix that and throw away the thing this mesh
+// exists for: the crown is a real curve and has to stay smooth. So a vertex is
+// split once per group of faces that meet smoothly on it — the crown's strips
+// stay one group and keep their averaged normal, while a cap and the wall
+// sharing a rim vertex become two. Positions are copied, never moved, so the
+// shell stays exactly as watertight as it was built.
+function creasedNormals(pos, idx, creaseDeg) {
+  const V = pos.length / 3;
+  const F = idx.length / 3;
+  const cosMax = Math.cos(d2r(creaseDeg));
+
+  // Face normals: unnormalised (its length is twice the area, which is the
+  // weight an averaged normal wants) and unit (what the crease test needs).
+  const fn = new Float64Array(F * 3);
+  const fu = new Float64Array(F * 3);
+  // A triangle only votes on shading if it has a direction worth trusting.
+  // An edge shorter than the planner's grid (see MERGE) is the difference of
+  // two coordinates that were each rounded to it, so its direction is noise,
+  // and so is the plane it helps define. Collapsed bar windows leave a run of
+  // those — fanned back into the caps with no area at all, and left along the
+  // walls as slivers a micron wide where a window closes between two levels.
+  const live = new Uint8Array(F);
+  for (let f = 0; f < F; f++) {
+    const a = idx[f * 3] * 3;
+    const b = idx[f * 3 + 1] * 3;
+    const c = idx[f * 3 + 2] * 3;
+    const ux = pos[b] - pos[a];
+    const uy = pos[b + 1] - pos[a + 1];
+    const uz = pos[b + 2] - pos[a + 2];
+    const vx = pos[c] - pos[a];
+    const vy = pos[c + 1] - pos[a + 1];
+    const vz = pos[c + 2] - pos[a + 2];
+    const x = uy * vz - uz * vy;
+    const y = uz * vx - ux * vz;
+    const z = ux * vy - uy * vx;
+    fn[f * 3] = x;
+    fn[f * 3 + 1] = y;
+    fn[f * 3 + 2] = z;
+    const len = Math.hypot(x, y, z);
+    const thin =
+      Math.hypot(ux, uy, uz) < MERGE ||
+      Math.hypot(vx, vy, vz) < MERGE ||
+      Math.hypot(vx - ux, vy - uy, vz - uz) < MERGE;
+    if (len > 1e-12 && !thin) {
+      live[f] = 1;
+      fu[f * 3] = x / len;
+      fu[f * 3 + 1] = y / len;
+      fu[f * 3 + 2] = z / len;
+    }
+  }
+
+  // vertex → the corners (face × 3 + slot, i.e. an index into `idx`) on it.
+  const start = new Uint32Array(V + 1);
+  for (let e = 0; e < idx.length; e++) start[idx[e] + 1]++;
+  for (let v = 0; v < V; v++) start[v + 1] += start[v];
+  const fill = Uint32Array.from(start.subarray(0, V));
+  const adj = new Uint32Array(idx.length);
+  for (let e = 0; e < idx.length; e++) adj[fill[idx[e]]++] = e;
+
+  // A vertex can split at most once per face on it, so the corner count is a
+  // ceiling for the output; it is trimmed to the real size on the way out.
+  // Everything below reuses flat scratch — a mesh this size would otherwise
+  // spend most of its time allocating two-element arrays.
+  const outIdx = new Uint32Array(idx.length);
+  const outPos = new Float32Array(idx.length * 3);
+  const outNrm = new Float32Array(idx.length * 3);
+  const at = new Int32Array(idx.length); // group each corner joined, by adjacency slot
+  const grow = (a) => {
+    const b = new Float64Array(a.length * 2);
+    b.set(a);
+    return b;
+  };
+  let rep = new Float64Array(24 * 3); // unit normal of the face that opened each group
+  let acc = new Float64Array(24 * 3); // area-weighted sum over the group
+  let out = 0;
+  for (let v = 0; v < V; v++) {
+    let n = 0; // groups on this vertex
+    for (let i = start[v]; i < start[v + 1]; i++) {
+      const f = (adj[i] / 3) | 0;
+      if (!live[f]) {
+        at[i] = -1; // sorted out below, once we know a group exists
+        continue;
+      }
+      let g = 0;
+      for (; g < n; g++) {
+        if (rep[g * 3] * fu[f * 3] + rep[g * 3 + 1] * fu[f * 3 + 1] + rep[g * 3 + 2] * fu[f * 3 + 2] >= cosMax) break;
+      }
+      if (g === n) {
+        if ((n + 1) * 3 > rep.length) {
+          rep = grow(rep);
+          acc = grow(acc);
+        }
+        rep[g * 3] = fu[f * 3];
+        rep[g * 3 + 1] = fu[f * 3 + 1];
+        rep[g * 3 + 2] = fu[f * 3 + 2];
+        acc[g * 3] = acc[g * 3 + 1] = acc[g * 3 + 2] = 0;
+        n++;
+      }
+      acc[g * 3] += fn[f * 3];
+      acc[g * 3 + 1] += fn[f * 3 + 1];
+      acc[g * 3 + 2] += fn[f * 3 + 2];
+      at[i] = g;
+    }
+    // A vertex with nothing but noise on it still has to exist, or the
+    // triangles holding it would index past the end of the buffer.
+    if (n === 0) {
+      acc[0] = acc[1] = 0;
+      acc[2] = 1; // an arbitrary unit normal; nothing that draws will use it
+      n = 1;
+    }
+    const base = out;
+    let dom = 0;
+    let domLen = -1;
+    for (let g = 0; g < n; g++) {
+      const x = acc[g * 3];
+      const y = acc[g * 3 + 1];
+      const z = acc[g * 3 + 2];
+      const len = Math.hypot(x, y, z);
+      if (len > domLen) {
+        domLen = len;
+        dom = g;
+      }
+      outPos[out * 3] = pos[v * 3];
+      outPos[out * 3 + 1] = pos[v * 3 + 1];
+      outPos[out * 3 + 2] = pos[v * 3 + 2];
+      outNrm[out * 3] = x / (len || 1);
+      outNrm[out * 3 + 1] = y / (len || 1);
+      outNrm[out * 3 + 2] = z / (len || 1);
+      out++;
+    }
+    // A face that could not vote shades with whichever surface holds most of
+    // this vertex, rather than with whichever one the index buffer happened to
+    // reach first — where a window closes between two levels the wall is left
+    // with a sliver a micron wide, and that is the wall's corner, not a coin
+    // toss with the crown beside it.
+    for (let i = start[v]; i < start[v + 1]; i++) {
+      outIdx[adj[i]] = base + (at[i] < 0 ? dom : at[i]);
+    }
+  }
+
+  return {
+    position: outPos.subarray(0, out * 3),
+    normal: outNrm.subarray(0, out * 3),
+    index: outIdx,
+  };
+}
+
 // Returns a BufferGeometry, or null when the sections did not sample to
 // matching rings — the caller then falls back to a plain extrusion rather
 // than drawing something torn.
@@ -409,12 +587,7 @@ export function buildLoftGeometry(THREE, plan, unique) {
   // take it in their stride, but earcut quietly drops triangles around it and
   // returns a torn cap.
   //
-  // So the cap is triangulated from the ring with those pairs merged. The
-  // threshold is the planner's own grid, and the measurement backs it up: on a
-  // crowned lugged wheel the collapsed pairs sit 1e-6 to 1.7e-4 mm apart while
-  // every real neighbour is at least 4.5e-2 mm away — three orders of clear
-  // air either side.
-  const MERGE = 1e-3;
+  // So the cap is triangulated from the ring with those pairs merged.
   const distinct = (ring) => {
     const keep = [];
     for (let i = 0; i < ring.length; i++) {
@@ -460,9 +633,10 @@ export function buildLoftGeometry(THREE, plan, unique) {
   }
 
   const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-  geo.setIndex(idx);
-  geo.computeVertexNormals();
+  const { position, normal, index } = creasedNormals(pos, idx, CREASE_DEG);
+  geo.setAttribute('position', new THREE.BufferAttribute(position, 3));
+  geo.setAttribute('normal', new THREE.BufferAttribute(normal, 3));
+  geo.setIndex(new THREE.BufferAttribute(index, 1));
   return geo;
 }
 

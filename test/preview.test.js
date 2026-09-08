@@ -10,7 +10,15 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import * as THREE from 'three';
 import { planWheel, tireSurfaceAt, tireLevels } from '../src/lib/wheel.js';
-import { tracePieceProfile, classifyCutters, shapeEmitter, buildPieceShape, buildLoftGeometry } from '../public/preview.js';
+import {
+  tracePieceProfile,
+  classifyCutters,
+  shapeEmitter,
+  buildPieceShape,
+  buildLoftGeometry,
+  buildPrismGeometry,
+  offAxisAngle,
+} from '../public/preview.js';
 
 // Records the traced profile as a point list (arcs sampled).
 function samplingEmitter() {
@@ -288,33 +296,68 @@ test('a crowned piece previews as a crowned mesh, not a cylinder', () => {
 // A stitched mesh is easy to get subtly wrong — a dropped quad, a cap wound
 // the wrong way, a triangulation borrowed from the wrong end. Every interior
 // edge belonging to exactly two faces catches all three.
+//
+// The tally has to weld by position before it counts, because two vertices can
+// stand in the same place: a crown deep enough to eat a tread window brings
+// that window's two wall points together, and the cap fans a zero-area
+// triangle back in over every such collapse on purpose. Counting raw indices
+// would let a real tear hide behind one of those pairs — the two halves of a
+// split edge read as one edge with two faces. So vertices are welded on exact
+// position, and the triangles that go degenerate under the weld are skipped:
+// those are the fans, and they bound nothing. Indexed or not, both preview
+// paths answer to the same count.
+function openEdges(geo) {
+  const pos = geo.getAttribute('position');
+  const idx = geo.getIndex() ? geo.getIndex().array : [...Array(pos.count).keys()];
+  const welded = new Map();
+  const weld = [];
+  for (let i = 0; i < pos.count; i++) {
+    const at = `${pos.getX(i)},${pos.getY(i)},${pos.getZ(i)}`;
+    if (!welded.has(at)) welded.set(at, welded.size);
+    weld.push(welded.get(at));
+  }
+  const edges = new Map();
+  for (let i = 0; i < idx.length; i += 3) {
+    const t = [weld[idx[i]], weld[idx[i + 1]], weld[idx[i + 2]]];
+    if (new Set(t).size < 3) continue; // a fan back in over a collapsed window
+    for (let k = 0; k < 3; k++) {
+      const a = t[k];
+      const b = t[(k + 1) % 3];
+      const key = a < b ? `${a}_${b}` : `${b}_${a}`;
+      edges.set(key, (edges.get(key) || 0) + 1);
+    }
+  }
+  return [...edges.values()].filter((v) => v !== 2).length;
+}
+
 test('lofted preview meshes are watertight and face outwards', () => {
   const CASES = [
     ['round, one piece', { diameter: 200, width: 28, tread: 'slick', infill: 'solid', profile: { shape: 'round' }, bore: { type: 'plain', diameter: 12 } }],
     ['crowned + bars', { tread: 'lugged', profile: { shape: 'crowned', crownDrop: 5 } }],
     ['angled bars, flat', { tread: 'angled', treadAngle: 30 }],
     ['chevron on a round section', { tread: 'chevron', treadAngle: 30, profile: { shape: 'round' } }],
+    // A lattice cell that overhangs a segment face is clamped to the joint
+    // keep-out, and that keep-out is a fixed perpendicular offset from the
+    // θ = 0 face — so the clamped edges land on the line y = const, and the
+    // next cell out along the band bridges to the outline along exactly that
+    // line. Earcut steps over horizontal edges while it hunts for something to
+    // bridge to, so it used to tunnel through the neighbouring cell and hand
+    // back a cap 39 triangles short: 86 of this mesh's edges bounded one face.
+    ['lattice web, crowned', { tread: 'lugged', infill: 'lattice', profile: { shape: 'crowned', crownDrop: 0 } }],
+    ['lattice web, angled bars on a round section', { tread: 'angled', treadAngle: 30, infill: 'lattice', profile: { shape: 'round' } }],
   ];
   for (const [name, cfg] of CASES) {
     const plan = planWheel(cfg);
     const geo = buildLoftGeometry(THREE, plan, plan.uniquePieces[0]);
     assert.ok(geo, `${name}: geometry built`);
+    const pos = geo.getAttribute('position');
     const idx = geo.getIndex().array;
-    const edges = new Map();
     for (let i = 0; i < idx.length; i += 3) {
-      const t = [idx[i], idx[i + 1], idx[i + 2]];
-      assert.equal(new Set(t).size, 3, `${name}: no degenerate triangles`);
-      for (let k = 0; k < 3; k++) {
-        const a = t[k];
-        const b = t[(k + 1) % 3];
-        const key = a < b ? `${a}_${b}` : `${b}_${a}`;
-        edges.set(key, (edges.get(key) || 0) + 1);
-      }
+      assert.equal(new Set([idx[i], idx[i + 1], idx[i + 2]]).size, 3, `${name}: no repeated vertex in a triangle`);
     }
-    assert.equal([...edges.values()].filter((v) => v !== 2).length, 0, `${name}: every edge shared by two faces`);
+    assert.equal(openEdges(geo), 0, `${name}: every edge shared by two faces`);
     // Normals on the tread band must point away from the axis.
     geo.computeVertexNormals();
-    const pos = geo.getAttribute('position');
     const nrm = geo.getAttribute('normal');
     let outward = 0;
     for (let i = 0; i < pos.count; i++) {
@@ -328,6 +371,94 @@ test('lofted preview meshes are watertight and face outwards', () => {
     }
     assert.ok(outward > 0, `${name}: tread surface found and facing out`);
   }
+});
+
+// The other half of the preview. A piece nothing shapes is a prism, and
+// ExtrudeGeometry triangulates its own caps — so the frame fix reaches it only
+// by turning the profile on the way in and turning the geometry back on the
+// way out, and the slivers the planner's rounding leaves behind have to be
+// welded off the profile before earcut ever sees them. Every one of the 84
+// pieces below was torn before that, 2960 open edges between them: lattice for
+// the horizontal-bridge reason the lofted test pins, and every style including
+// solid for three slivers a cap. Take either half out and the other half's
+// cases still fail, which is what says both are load-bearing.
+//
+// Only the segment counts the planner itself settles on are checked, plus the
+// one- and two-piece ends of the range. Forcing a high count on a non-keyed
+// bore (hex from 14 up, bolt from 11) folds the piece profile across itself,
+// and no triangulator answers for a polygon that crosses itself — that is a
+// planner defect, and it is torn on the raw extrusion too.
+test('extruded preview meshes are watertight, every web style', () => {
+  const WEBS = ['solid', 'spokes', 'honeycomb', 'flexweb', 'lattice', 'auxetic', 'voronoi'];
+  const CASES = [];
+  for (const infill of WEBS) for (const type of ['keyed', 'plain', 'hex', 'dbore', 'bolt']) CASES.push([infill, type, undefined]);
+  // One and two pieces trace a different outline kind altogether — a whole
+  // circle, or a ring with the bars notched into it, rather than a wedge — so
+  // every web gets both ends of the range too.
+  for (const infill of WEBS) for (const N of [1, 2]) CASES.push([infill, 'plain', N]);
+
+  const flatArea = (l) => Math.abs(THREE.ShapeUtils.area(l));
+  for (const [infill, type, N] of CASES) {
+    const plan = planWheel({ infill, bore: { type }, tread: 'lugged', profile: { shape: 'flat' }, ...(N ? { segmentsOverride: N } : {}) });
+    assert.equal(plan.sections.length, 1, `${infill}/${type}: a plain prism, not a loft`);
+    for (let k = 0; k < plan.uniquePieces.length; k++) {
+      const u = plan.uniquePieces[k];
+      const what = `${infill}/${type}/N${plan.N} piece ${k}`;
+      assert.ok(!classifyCutters(u.cutters).tire, `${what}: nothing shapes it`);
+      const geo = buildPrismGeometry(THREE, plan, u);
+      assert.equal(openEdges(geo), 0, `${what}: every edge shared by two faces`);
+      // And neither the weld nor the two rotations move the solid: the shell
+      // encloses the profile's own area swept across the width.
+      const { shape, holes } = buildPieceShape(THREE, plan, u).extractPoints(48);
+      const want = (flatArea(shape) - holes.reduce((s, h) => s + flatArea(h), 0)) * plan.W;
+      const got = signedVolume(geo);
+      assert.ok(
+        Math.abs(got - want) / want < 1e-4,
+        `${what}: encloses ${got.toFixed(0)} mm³, profile sweeps ${want.toFixed(0)} mm³`
+      );
+    }
+  }
+});
+
+// Both fixes rest on one property, worth pinning away from the meshes that
+// depend on it: turned by offAxisAngle, nothing in the profile is flat, so
+// earcut's hole bridging cannot step over an edge lying on its own ray.
+// Checked on a lattice piece, whose seam-clamped cells are what put runs of
+// edges on a single horizontal line to begin with.
+test('the triangulation frame leaves no edge horizontal', () => {
+  const plan = planWheel({ infill: 'lattice', tread: 'lugged', profile: { shape: 'flat' } });
+  const { shape, holes } = buildPieceShape(THREE, plan, plan.uniquePieces[0]).extractPoints(48);
+  const loops = [shape, ...holes];
+
+  // The hazard is present: more than one cell carries edges on one horizontal.
+  const sharing = new Map();
+  holes.forEach((l, li) => {
+    for (let i = 0; i < l.length; i++) {
+      const q = l[(i + 1) % l.length];
+      if (l[i].y !== q.y) continue;
+      if (!sharing.has(q.y)) sharing.set(q.y, new Set());
+      sharing.get(q.y).add(li);
+    }
+  });
+  assert.ok(
+    [...sharing.values()].some((cells) => cells.size > 1),
+    'cells clamped to the seam do share a horizontal line'
+  );
+
+  const theta = offAxisAngle(loops);
+  let closest = Infinity;
+  for (const l of loops) {
+    for (let i = 0; i < l.length; i++) {
+      const p = l[i];
+      const q = l[(i + 1) % l.length];
+      const dx = q.x - p.x;
+      const dy = q.y - p.y;
+      if (dx === 0 && dy === 0) continue;
+      const off = (((Math.atan2(dy, dx) + theta) % Math.PI) + Math.PI) % Math.PI;
+      closest = Math.min(closest, off, Math.PI - off);
+    }
+  }
+  assert.ok(closest > 1e-3, `no edge lands on the horizontal (closest ${closest.toExponential(2)} rad)`);
 });
 
 test('a flat piece needs no loft and every section stays congruent', () => {

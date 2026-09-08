@@ -312,6 +312,82 @@ const signedArea = (pts) => {
   return a / 2;
 };
 
+// The planner rounds every coordinate it emits to this grid, so two points
+// closer together than one step of it are not two points — they are one point
+// that reached the profile twice, and either preview path may weld them.
+const MERGE = 1e-3;
+
+// Earcut bridges every hole into the outline before it triangulates: from the
+// hole's leftmost vertex it casts a ray in −x and connects to the first edge
+// the ray meets. Exactly-horizontal edges are skipped in that search — they
+// cannot bound a crossing — so a horizontal edge lying *on* the ray is
+// invisible to it. The bridge is then run through the hole that edge belongs
+// to, the merged loop self-intersects, and earcut quietly returns a short
+// triangle list: a torn cap, with no error to catch.
+//
+// The lattice walks into this by construction rather than by luck. Cells that
+// overhang a segment face are clamped to the joint keep-out, and that keep-out
+// is a fixed perpendicular offset from the θ = 0 face — the line y = const —
+// so every clamped cell carries a run of edges at exactly the same y, and the
+// next cell out along the band aims its bridge ray straight down that line.
+// A default lugged lattice piece has three of its seven cells sitting on
+// y = 6.078 and loses 39 of its 673 cap triangles; every shaped lattice config
+// is torn the same way, and no other web style is (their cells never reach the
+// keep-out, so nothing lines up). The piece outline is a standing hazard too:
+// its θ = 0 face is horizontal by definition.
+//
+// So the answer is to triangulate in a frame where nothing is horizontal.
+// Only indices come back and those do not depend on the frame, so the rotation
+// costs the result nothing. The rotation that would flatten an edge of
+// direction (dx, dy) is −atan2(dy, dx) mod π; the midpoint of the widest gap
+// between those puts every edge as far off horizontal as the loops allow.
+// Across the whole config matrix that margin never falls below 0.011 rad, which
+// lifts even the shortest seam edge tens of microns clear of flat — many
+// thousands of ulps from the tie that breaks the search.
+//
+// Both preview paths need this, and the prism path needs the angle by itself:
+// it cannot intercept the triangulation ExtrudeGeometry runs internally, so it
+// turns the profile going in and turns the geometry back on the way out.
+export function offAxisAngle(loops) {
+  const flatten = [];
+  for (const l of loops) {
+    for (let i = 0; i < l.length; i++) {
+      const p = l[i];
+      const q = l[(i + 1) % l.length];
+      const dx = q.x - p.x;
+      const dy = q.y - p.y;
+      if (dx === 0 && dy === 0) continue;
+      flatten.push(((-Math.atan2(dy, dx)) % Math.PI + Math.PI) % Math.PI);
+    }
+  }
+  flatten.sort((a, b) => a - b);
+  let theta = 0;
+  let widest = -1;
+  for (let i = 0; i < flatten.length; i++) {
+    const a = flatten[i];
+    const b = i + 1 < flatten.length ? flatten[i + 1] : flatten[0] + Math.PI;
+    if (b - a > widest) {
+      widest = b - a;
+      theta = (a + b) / 2;
+    }
+  }
+  return theta;
+}
+
+const turnBy = (theta) => {
+  const cos = Math.cos(theta);
+  const sin = Math.sin(theta);
+  return (p) => [p.x * cos - p.y * sin, p.x * sin + p.y * cos];
+};
+
+function triangulateOffAxis(THREE, loops) {
+  const turn = turnBy(offAxisAngle(loops));
+  // Copies, so triangulateShape's in-place tidy of the loop ends cannot reach
+  // the hole rings the rest of the mesh is indexed against.
+  const [contour, ...holes] = loops.map((l) => l.map((p) => new THREE.Vector2(...turn(p))));
+  return THREE.ShapeUtils.triangulateShape(contour, holes);
+}
+
 // Returns a BufferGeometry, or null when the sections did not sample to
 // matching rings — the caller then falls back to a plain extrusion rather
 // than drawing something torn.
@@ -409,12 +485,11 @@ export function buildLoftGeometry(THREE, plan, unique) {
   // take it in their stride, but earcut quietly drops triangles around it and
   // returns a torn cap.
   //
-  // So the cap is triangulated from the ring with those pairs merged. The
-  // threshold is the planner's own grid, and the measurement backs it up: on a
-  // crowned lugged wheel the collapsed pairs sit 1e-6 to 1.7e-4 mm apart while
-  // every real neighbour is at least 4.5e-2 mm away — three orders of clear
-  // air either side.
-  const MERGE = 1e-3;
+  // So the cap is triangulated from the ring with those pairs merged, on the
+  // planner's own grid (MERGE). The measurement backs the threshold up here
+  // too: on a crowned lugged wheel the collapsed pairs sit 1e-6 to 1.7e-4 mm
+  // apart while every real neighbour is at least 4.5e-2 mm away — three orders
+  // of clear air either side.
   const distinct = (ring) => {
     const keep = [];
     for (let i = 0; i < ring.length; i++) {
@@ -442,7 +517,7 @@ export function buildLoftGeometry(THREE, plan, unique) {
       if (down === ccw) idx.push(base + a, base + c, base + b);
       else idx.push(base + a, base + b, base + c);
     };
-    for (const [a, b, c] of THREE.ShapeUtils.triangulateShape(contour, holeVecs)) {
+    for (const [a, b, c] of triangulateOffAxis(THREE, [contour, ...holeVecs])) {
       tri(map(a), map(b), map(c));
     }
     // The side strips still end on *every* ring vertex, repeats included, so
@@ -464,6 +539,69 @@ export function buildLoftGeometry(THREE, plan, unique) {
   geo.setIndex(idx);
   geo.computeVertexNormals();
   return geo;
+}
+
+// Chords per curve for the prism path. ExtrudeGeometry spends this on every
+// curve rather than scaling it to the sweep, so a 60° rim arc comes out finer
+// here than the loft's sweep-scaled count would draw it — which is the reason
+// an unshaped piece is extruded rather than lofted, along with it being
+// cheaper.
+const PRISM_SEGMENTS = 48;
+
+// A piece that nothing shapes is a plain prism, and ExtrudeGeometry builds one
+// straight from the profile. It has to be handed a profile earcut can actually
+// triangulate, though, and the profile as traced is not: two things trip it.
+//
+// The first is a sliver the planner's rounding leaves behind. Path.absarc
+// joins each arc to the point the pen is already at, and inserts a lineTo when
+// the arc's computed start does not land exactly there — which it never quite
+// does, because the stated endpoint, the centre and the radius were each
+// rounded to MERGE independently, so the two disagree by up to 6e-4 mm. Earcut
+// drops that sliver's triangle; the wall strip keeps it; and the cap and the
+// wall then part company over which of the two points they met at, leaving
+// three edges on one face per sliver. A plain lugged wheel carries three of
+// them at each end, in every web style, solid included.
+//
+// Sub-grid is the tell, and it is what makes welding them safe: the planner
+// cannot place two distinct points closer than MERGE, so anything nearer is
+// one point that arrived twice. Measured across the config matrix, sub-grid
+// neighbours reach 6.1e-4 mm and never once fall two in a row, while the
+// closest genuine pair is a full grid step apart — the weld only ever takes
+// one point out of a doubled pair, never a run out of a curve. 25944 loops
+// welded, and the smallest came out at 6 points.
+//
+// The second is earcut's blindness to horizontal edges while it bridges holes,
+// which is what offAxisAngle answers. ExtrudeGeometry triangulates internally,
+// so there is nothing to intercept: the profile goes in turned and the
+// geometry comes back out turned the other way. Both are rigid, so the solid
+// is the one the profile describes either way.
+export function buildPrismGeometry(THREE, plan, unique, section = plan.outline) {
+  const traced = buildPieceShape(THREE, plan, unique, section).extractPoints(PRISM_SEGMENTS);
+  const loops = [traced.shape, ...traced.holes].map((l) =>
+    l.filter((p, i) => {
+      const q = l[(i + 1) % l.length];
+      return Math.hypot(p.x - q.x, p.y - q.y) > MERGE;
+    })
+  );
+  const theta = offAxisAngle(loops);
+  const turn = turnBy(theta);
+  const turned = loops.map((l, li) => {
+    const path = li ? new THREE.Path() : new THREE.Shape();
+    l.forEach((p, i) => {
+      const [x, y] = turn(p);
+      if (i) path.lineTo(x, y);
+      else path.moveTo(x, y);
+    });
+    return path;
+  });
+  const shape = turned[0];
+  shape.holes = turned.slice(1);
+  const geo = new THREE.ExtrudeGeometry(shape, {
+    depth: plan.W,
+    bevelEnabled: false,
+    curveSegments: PRISM_SEGMENTS,
+  });
+  return geo.rotateZ(-theta);
 }
 
 export async function createPreview(canvas) {
@@ -515,12 +653,7 @@ function create3D(canvas, { T: THREE, OrbitControls }) {
     // arcs more finely, so plain wheels keep it.
     const shaped = plan.sections.length > 1 || classifyCutters(unique.cutters).tire;
     const geo =
-      (shaped ? buildLoftGeometry(THREE, plan, unique) : null) ||
-      new THREE.ExtrudeGeometry(buildPieceShape(THREE, plan, unique), {
-        depth: plan.W,
-        bevelEnabled: false,
-        curveSegments: 48,
-      });
+      (shaped ? buildLoftGeometry(THREE, plan, unique) : null) || buildPrismGeometry(THREE, plan, unique);
     return { geo };
   }
 

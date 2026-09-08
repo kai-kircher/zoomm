@@ -74,8 +74,8 @@ you download the source bundle and run `pip install cadquery-ocp && python build
 which is the same code, on the same files, that the server would have run.
 
 ```sh
-npm test           # 194 unit tests: chunking math, joints, dedupe, piece profiles, every web pattern's wall and overlap guarantees, material-zone boundaries, emitted-bundle geometry
-npm run validate   # regenerates a 24-config matrix and builds every piece through the real kernel
+npm test           # 196 unit tests: chunking math, joints, dedupe, piece profiles, every web pattern's wall and overlap guarantees, material-zone boundaries, emitted-bundle geometry
+npm run validate   # regenerates a 26-config matrix and builds every piece through the real kernel
 ```
 
 ## Documentation
@@ -94,7 +94,8 @@ npm run validate   # regenerates a 24-config matrix and builds every piece throu
                       │
                       ├─ segment-count solver (annular-sector bbox vs. usable bed, prefers
                       │  counts that make pieces identical for your hub's symmetry)
-                      ├─ dovetail sizing (rim ring + hub ring; clearance per side)
+                      ├─ dovetail sizing (rim ring + hub ring; clearance per side,
+                      │  fitted to the wedge so a pocket never breaks out the far face)
                       ├─ web layout (spokes, flex-web slots, or a honeycomb /
                       │  lattice / auxetic / voronoi cell pattern), kept clear
                       │  of seam keep-outs so joints stay solid
@@ -126,7 +127,10 @@ hub ring, so all pieces slide together along the axle direction and any piece ca
 last. Dovetails resist the circumferential separation; axial retention comes from the adhesive
 (plus hub bolts, when you pick a bolt-circle hub). Because the tenon/pocket geometry is part of
 each piece's 2D outline, the build needs nothing beyond wires, faces, one prism or loft, and
-one subtract — the most battle-tested operations in the kernel.
+one subtract — the most battle-tested operations in the kernel. A dovetail is sized from the
+ring of material it sits in *and* from the width of the wedge at that radius, since a pocket cut
+into one seam face has to keep a wall to the other one; on a high segment count the hub dovetail
+therefore comes back narrower than the ring alone would allow, and the plan notes say so.
 
 For keyed, hex and D hubs the wedges extend inward past the bore line and the bore tool is
 subtracted per piece, so the assembled hub carries the exact mating feature with your chosen fit

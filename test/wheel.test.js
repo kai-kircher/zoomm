@@ -1006,3 +1006,196 @@ test('every tread × profile × web × hub combination yields closed, congruent 
   assert.ok(count > 500, `swept ${count} configurations`);
   assert.deepEqual(problems.slice(0, 5), [], `${problems.length} bad configurations`);
 });
+
+// ---------------------------------------------------------------------------
+// Material zones
+// ---------------------------------------------------------------------------
+
+// Radius range a cutter's boundary actually covers. Sampled rather than read
+// off the endpoints, because a chord passes closer to the axis than either of
+// its ends and an arc's extreme radius is usually somewhere in its middle.
+function radiusRange(cutter) {
+  const TAU = Math.PI * 2;
+  let lo = Infinity;
+  let hi = 0;
+  // A revolved tool's loop is drawn in the (r, z) half-plane, so there the
+  // radius is just the first coordinate; everything else is drawn in XY.
+  const radial = cutter.shape === 'revolve';
+  const at = (x, y) => {
+    const r = radial ? x : Math.hypot(x, y);
+    lo = Math.min(lo, r);
+    hi = Math.max(hi, r);
+  };
+  const line = (a, b) => {
+    for (let i = 0; i <= 32; i++) at(a[0] + ((b[0] - a[0]) * i) / 32, a[1] + ((b[1] - a[1]) * i) / 32);
+  };
+  const arc = (s) => {
+    const c = s.center;
+    const r = (Math.hypot(s.a[0] - c[0], s.a[1] - c[1]) + Math.hypot(s.b[0] - c[0], s.b[1] - c[1])) / 2;
+    const t0 = Math.atan2(s.a[1] - c[1], s.a[0] - c[0]);
+    const t1 = Math.atan2(s.b[1] - c[1], s.b[0] - c[0]);
+    let sweep = s.ccw === false ? -((((t0 - t1) % TAU) + TAU) % TAU) : (((t1 - t0) % TAU) + TAU) % TAU;
+    if (Math.abs(sweep) < 1e-12) sweep = s.ccw === false ? -TAU : TAU;
+    for (let i = 0; i <= 64; i++) {
+      const t = t0 + (sweep * i) / 64;
+      at(c[0] + r * Math.cos(t), c[1] + r * Math.sin(t));
+    }
+  };
+  if (cutter.shape === 'circle') {
+    for (let i = 0; i <= 64; i++) {
+      const t = (TAU * i) / 64;
+      at(cutter.c[0] + cutter.r * Math.cos(t), cutter.c[1] + cutter.r * Math.sin(t));
+    }
+  } else if (cutter.shape === 'poly') {
+    cutter.pts.forEach((p, i) => line(p, cutter.pts[(i + 1) % cutter.pts.length]));
+  } else {
+    for (const s of cutter.segs) (s.kind === 'line' ? line(s.a, s.b) : arc(s));
+  }
+  return { lo, hi };
+}
+
+// The whole scheme rests on this: a material boundary is a cylinder that is
+// solid all the way round, so two bodies meet on a complete annular face. Web
+// patterns are laid out inside [rHub + 0.5, rRimIn - 0.5], dovetails sit
+// inside a band, the tire tool stops at the rim ring, bolt holes clear the hub
+// ring — but no one place says so. This does, on the finished geometry.
+test('nothing the planner cuts ever crosses a material boundary', () => {
+  const problems = [];
+  let checked = 0;
+  for (const diameter of [80, 120, 200, 355.6, 700]) {
+    for (const infill of ['solid', 'spokes', 'honeycomb', 'flexweb', 'lattice', 'auxetic', 'graded', 'voronoi']) {
+      for (const tread of ['slick', 'lugged', 'ribbed', 'chevron']) {
+        for (const type of ['keyed', 'plain', 'hex', 'dbore', 'bolt']) {
+          for (const shape of ['flat', 'crowned', 'round']) {
+            const plan = planWheel({
+              diameter,
+              width: 40,
+              infill,
+              tread,
+              treadAngle: 30,
+              profile: { shape },
+              bore: { type },
+              materials: { tread: 'tpu', web: 'petg', hub: 'abs' },
+            });
+            const what = [diameter, infill, tread, type, shape].join('/');
+            checked++;
+            // Two exceptions, both understood.
+            //
+            // A bolt circle can be asked for wider than a wheel has room for,
+            // and on one whose hub ring has already swallowed the web band the
+            // holes then reach past the only boundary there is. Allowed — the
+            // bodies still tile the piece exactly — but only when the plan
+            // says so out loud.
+            //
+            // A flex-web slot's corners are offset perpendicular to a *curved*
+            // centreline, so a corner sits further from the axle than the
+            // centreline's end does and the slot reaches a little way into the
+            // rim band. That is how the flex web has always been laid out; the
+            // bound here is what keeps it from being a licence.
+            const declared = plan.warnings.some((w) => /hub features reach/.test(w));
+            const hubFeature = (id) => id === 'bore' || id === 'keyway' || /^bolt\d*$/.test(id);
+            const FLEX_SLACK = 2;
+            for (const b of plan.zones.slice(1).map((z) => z.r0)) {
+              for (const u of plan.uniquePieces) {
+                for (const c of u.cutters) {
+                  const { lo, hi } = radiusRange(c);
+                  if (lo >= b - 1e-9 || hi <= b + 1e-9) continue;
+                  if (hubFeature(c.id) && declared) continue;
+                  if (infill === 'flexweb' && /^web/.test(c.id) && hi < b + FLEX_SLACK) continue;
+                  problems.push(`${what}: cutter ${c.id} spans ${lo.toFixed(2)}-${hi.toFixed(2)}, across the boundary at ${b}`);
+                }
+              }
+              // A dovetail straddling a boundary would come out half one
+              // filament and half the other. A tenon is not a laminate.
+              for (const j of plan.joints) {
+                const reach = j.hh + plan.jointClearance;
+                if (j.r - reach < b - 1e-9 && j.r + reach > b + 1e-9) {
+                  problems.push(`${what}: ${j.tag} dovetail at r=${j.r} +/-${reach.toFixed(2)} straddles ${b}`);
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  assert.ok(checked > 500, `swept ${checked} configurations`);
+  assert.deepEqual(problems.slice(0, 5), [], `${problems.length} boundary crossings`);
+});
+
+test('one material is one body, and neighbours sharing a filament merge', () => {
+  const plain = planWheel({});
+  assert.equal(plain.multiMaterial, false);
+  assert.equal(plain.zones.length, 1);
+  assert.equal(plain.zones[0].material, 'petg');
+  assert.equal(plain.zones[0].r0, 0);
+  assert.deepEqual(plain.interfaces, []);
+
+  // Naming every zone what the wheel already is changes nothing.
+  const same = planWheel({ materials: { tread: 'petg', web: 'petg', hub: 'petg' } });
+  assert.equal(same.multiMaterial, false);
+  assert.deepEqual(same.zones.map((z) => z.keys), [['hub', 'web', 'tread']]);
+
+  const two = planWheel({ materials: { tread: 'tpu' } });
+  assert.equal(two.multiMaterial, true);
+  assert.deepEqual(two.zones.map((z) => z.key), ['hub-web', 'tread']);
+  assert.deepEqual(two.zones.map((z) => z.material), ['petg', 'tpu']);
+
+  const three = planWheel({ materials: { tread: 'tpu', web: 'petg', hub: 'abs' } });
+  assert.deepEqual(three.zones.map((z) => z.key), ['hub', 'web', 'tread']);
+  assert.deepEqual(three.materialSet, ['abs', 'petg', 'tpu']);
+});
+
+test('zones tile the wheel from the axle out and land on the band walls', () => {
+  const plan = planWheel({ materials: { tread: 'tpu', web: 'petg', hub: 'abs' } });
+  assert.equal(plan.zones[0].r0, 0);
+  for (let i = 1; i < plan.zones.length; i++) {
+    assert.equal(plan.zones[i].r0, plan.zones[i - 1].r1, 'no gap between bodies');
+  }
+  assert.equal(plan.zones[1].r0, plan.radii.rHub);
+  assert.equal(plan.zones[2].r0, plan.radii.rRimIn);
+  // The outermost body is bounded by the wheel, not by its own tool.
+  assert.ok(plan.zones[2].r1 > plan.radii.R);
+});
+
+test('an unknown filament falls back to the wheel material, not to nothing', () => {
+  const plan = planWheel({ material: 'pla', materials: { tread: 'nylon', web: '', hub: 'tpu' } });
+  assert.equal(plan.materials.tread, 'pla');
+  assert.equal(plan.materials.web, 'pla');
+  assert.equal(plan.materials.hub, 'tpu');
+});
+
+test('a web band too thin to print takes the hub filament, and says so', () => {
+  // A 30 mm wheel has no web band at all: the hub ring meets the rim band.
+  const plan = planWheel({ diameter: 30, width: 20, bore: { type: 'plain', diameter: 8 }, materials: { tread: 'tpu', web: 'pla', hub: 'abs' } });
+  assert.ok(plan.radii.rRimIn - plan.radii.rHub < 3);
+  assert.equal(plan.materials.web, 'abs');
+  assert.ok(plan.zones.every((z) => z.material !== 'pla'), 'the web filament goes unused');
+  assert.ok(plan.warnings.some((w) => /web band/i.test(w)), 'and the refusal is reported');
+});
+
+test('a weak interface is a warning, a good one is not', () => {
+  const weak = planWheel({ materials: { tread: 'tpu', web: 'pla', hub: 'pla' } });
+  assert.equal(weak.interfaces[0].level, 'weak');
+  assert.equal(weak.warnings.filter((w) => /bond|stick|grip/i.test(w)).length, 1);
+
+  const good = planWheel({ materials: { tread: 'tpu', web: 'petg', hub: 'petg' } });
+  assert.equal(good.interfaces[0].level, 'good');
+  assert.deepEqual(good.warnings.filter((w) => /bond|stick|grip/i.test(w)), []);
+});
+
+test('each dovetail gets the adhesive for the filament it is cut in', () => {
+  const plan = planWheel({ materials: { tread: 'tpu' } });
+  const byTag = Object.fromEntries(plan.joints.map((j) => [j.tag, j.material]));
+  assert.equal(byTag.rim, 'tpu', 'the rim joint lives in the tread band');
+  assert.equal(byTag.hub, 'petg');
+  assert.deepEqual(plan.glue.perJoint.map((j) => `${j.tag}:${j.material}`), ['hub:petg', 'rim:tpu']);
+  // One filament at every seam: one recommendation, exactly as before.
+  assert.equal(planWheel({}).glue.perJoint, undefined);
+});
+
+test('print settings are listed per filament once there is more than one', () => {
+  assert.equal(planWheel({}).printRec.byMaterial, undefined);
+  const plan = planWheel({ materials: { tread: 'tpu' } });
+  assert.deepEqual(plan.printRec.byMaterial.map((r) => `${r.material}/${r.walls}`), ['petg/4', 'tpu/3']);
+});

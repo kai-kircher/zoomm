@@ -22,6 +22,9 @@ and the glue-up instructions.
 
 - **Configure the wheel**: diameter, width, material (PLA/PETG/ABS/TPU), and hub interface (keyed
   shaft, plain, hex, D-bore, or bolt circle with pilot).
+- **Give each part its own filament**: a TPU tread on a PETG core, a stiffer hub than web. Each
+  piece then exports as one file per material, split on cylinders that are solid all the way
+  round, ready to load into a slicer as the parts of a single object.
 - **Pick a tread**: lugged (straight bars), angled, chevron / V-bar, ribbed, diamond, or slick —
   with bar count, bar angle, rib count and depth all settable.
 - **Pick a cross-section**: flat cylindrical, crowned by a settable drop, or a full round
@@ -71,8 +74,8 @@ you download the source bundle and run `pip install cadquery-ocp && python build
 which is the same code, on the same files, that the server would have run.
 
 ```sh
-npm test           # 173 unit tests: chunking math, joints, dedupe, piece profiles, every web pattern's wall and overlap guarantees, emitted-bundle geometry
-npm run validate   # regenerates a 21-config matrix and builds every piece through the real kernel
+npm test           # 194 unit tests: chunking math, joints, dedupe, piece profiles, every web pattern's wall and overlap guarantees, material-zone boundaries, emitted-bundle geometry
+npm run validate   # regenerates a 24-config matrix and builds every piece through the real kernel
 ```
 
 ## Documentation
@@ -98,7 +101,8 @@ npm run validate   # regenerates a 21-config matrix and builds every piece throu
                       ├─ tread + tire cross-section (bar notches and the crown arc are
                       │  drawn into the piece profile itself, one profile per z level;
                       │  counts snap to multiples of N so seams land between bars)
-                      └─ per-piece hub features + signature dedupe (keyway/D-flat/bolt windows)
+                      ├─ per-piece hub features + signature dedupe (keyway/D-flat/bolt windows)
+                      └─ material zones: which radial bands get which filament
                       │
         ┌─────────────┴──────────────┐
         ▼                            ▼
@@ -108,6 +112,7 @@ npm run validate   # regenerates a 21-config matrix and builds every piece throu
                                      │
                                      ▼
                           OpenCascade (python build.py .) ──► STL + STEP
+                          (one file per piece, or one per filament)
 ```
 
 One geometry plan feeds both the preview and the code generator, so what you see is what the
@@ -321,9 +326,85 @@ centreline and fade out towards the shoulders exactly as a moulded tire's do. Th
 so a rim band and a web always survive underneath it; ask for more and you get a warning and the
 deepest section the wheel can actually give up.
 
+## Multi-material: a soft tread on a rigid core
+
+Tick **Multi-material** and the one material select becomes three — tread, web, hub. Anything you
+leave alone follows the wheel's material, so a single-material wheel is still the default and is
+emitted exactly as it always was: one solid, one file per piece.
+
+The split lines are the two cylinders that separate the wheel's bands:
+
+```
+  0        bore        hub ring        web band          rim ring   tread   R
+  ├──────────┼─────────────┼───────────────┼────────────────┼─────────┤
+                           ↑                                ↑
+                       hub │ web                        web │ tread
+                         rHub                            rRimIn
+```
+
+Those two and no others, because a material boundary has to be **solid all the way round**: every
+web pattern is laid out inside `[rHub + 0.5, rRimIn − 0.5]`, no dovetail reaches either line, and
+the tire tool stops at the rim ring — so the two bodies meet on a complete annular face rather
+than on something the web has holes in. `rRimIn` in particular keeps the whole rim ring with the
+tread, so a soft tread gets a sidewall and its own dovetails instead of a 3 mm skin. (The obvious
+alternative — the bar-window floor at `R − treadEff` — is a surface the piece profile already lies
+on, and a boolean asked to cut exactly where the body already ends is the one that quietly does
+nothing.)
+
+Neighbouring bands that name the same filament are merged, so "TPU tread, PETG web, PETG hub" is
+**two** bodies and not three: one file per thing you actually print.
+
+```
+piece-A-hub-web-petg.stl     piece-A-tread-tpu.stl
+piece-A-hub-web-petg.step    piece-A-tread-tpu.step
+```
+
+The bodies **share their boundary cylinder exactly** — no gap, no overlap — which is what a slicer
+wants from the parts of one object. Select the files of one piece, import them together, say yes
+to *load as a single object with multiple parts*, and assign a filament to each part. The
+generated `ASSEMBLY.md` carries that as a checklist, with the band diameters and the filament for
+each.
+
+The kernel does the split as one intersection per body against an annulus, then **checks the
+bodies add back up to the piece they came from** and refuses to write them if they do not. That
+check is there because this is a family of operations that fails quietly: an intersection whose
+tool misses returns nothing, and one whose tool seam lands in the plane of a face of the body can
+return the whole body — both of them valid, watertight, wheel-shaped solids. A volume that is
+suddenly 3× or 0× is not.
+
+### Which filaments actually stick to each other
+
+The interface is a plain cylinder, so it carries the load in shear: everything the tread does to
+the ground it does through it. It is as strong as the weld between the two filaments and no
+stronger, which matters more here than on a decorative two-colour print. Wheelwright says so up
+front rather than letting you find out on a hill:
+
+| Pairing | Verdict |
+|---|---|
+| Same filament | Welds — an ordinary layer bond. |
+| PETG + TPU | Bonds well. The pairing to reach for. |
+| PLA + TPU | Weak — TPU grips PLA far more weakly than PETG. |
+| PLA + PETG | Weak — PETG is what people put *under* PLA supports so they come away clean. |
+| ABS + anything else | Weak, and the two want different chamber temperatures. |
+
+A weak pairing is a warning in the plan, in the panel, and in `ASSEMBLY.md`.
+
+Two more things the app tells you rather than hides:
+
+- **Every seam is a separate glue-up.** A dovetail only ever joins a piece to its own kind, so the
+  rim joint of a TPU-tread wheel is TPU-to-TPU and its hub joint is PETG-to-PETG — two different
+  adhesives, listed per joint.
+- **A single-nozzle machine will purge a lot.** The bodies are rings and the piece prints lying
+  flat, so *every layer crosses every one of them*: an AMS or MMU changes filament at least once
+  per layer — on a 50 mm wide wheel that is roughly 250 changes per body boundary — and purges
+  each time. Independent tool heads make it nearly free; one nozzle does not. The number is in
+  `ASSEMBLY.md` for your wheel.
+
 ## Adhesive guidance (the flexible-glue question)
 
-The app recommends per material, and bakes it into the generated `ASSEMBLY.md`:
+This is about the **seams between segments**, which is a different question from the interface
+between two filaments above. The app recommends per material — per *joint*, on a multi-material
+wheel — and bakes it into the generated `ASSEMBLY.md`:
 
 - **TPU** — flexible contact adhesive (E6000 / Shoe Goo class); rigid glue lines crack on a
   flexing tire.
@@ -431,7 +512,7 @@ Everything the UI does is plain JSON over HTTP:
 | `POST /api/plan` | Full geometry plan (segments, joints, warnings, per-piece cutters) |
 | `POST /api/source` | Generated files as JSON |
 | `POST /api/source.zip` | Source bundle download (self-building) |
-| `POST /api/export/stl` | STL and/or STEP built by OpenCascade — `?formats=stl,step`, both by default (503 + instructions if the kernel is missing) |
+| `POST /api/export/stl` | STL and/or STEP built by OpenCascade — `?formats=stl,step`, both by default (503 + instructions if the kernel is missing). One file per piece, or one per filament on a multi-material wheel |
 | `GET /api/health` | Whether the geometry kernel is installed, and which interpreter has it |
 
 Request body = the same parameter object the form produces (all fields optional; see
@@ -451,7 +532,7 @@ src/lib/zip.js                dependency-free ZIP writer
 src/lib/env.js                dependency-free .env / .env.local loader
 public/                       UI (vanilla JS + vendored three.js, 2D canvas fallback)
 scripts/setup-occ.mjs         creates ./bin/occ-venv with OpenCascade installed
-scripts/validate-occ.js       builds a 21-config matrix through the real kernel
+scripts/validate-occ.js       builds a 24-config matrix through the real kernel
 test/                         node:test suite
 ```
 
@@ -485,9 +566,15 @@ test/                         node:test suite
   handles it, but it is a real second runtime next to Node. On Windows, keep the venv path
   short: OpenCascade's DLLs hit `MAX_PATH` under a deep checkout, and the setup script warns
   before it spends the download.
-- Wishlist: 3MF export (STL and STEP are in), mass/inertia from the B-rep — OpenCascade already
-  computes the volume the validator prints — chamfered joint lead-ins, per-piece print-time
-  estimates.
+- Multi-material bodies **share their boundary exactly**, which is right for printing them
+  together and wrong for printing them apart: there is no fit clearance to press a separately
+  printed tread onto a core with, and no interlock to carry torque across a weak interface. The
+  interface is a plain cylinder, so a bad filament pairing is warned about rather than reinforced.
+  A clearance-fit variant and a keyed interface are the fixes; neither is in yet.
+- Wishlist: 3MF export (STL and STEP are in) — it would carry the per-part filament assignment
+  that today's separate STLs leave you to make in the slicer — mass/inertia from the B-rep, since
+  OpenCascade already computes the volume the validator prints, chamfered joint lead-ins, and
+  per-piece print-time estimates.
 
 ## License
 

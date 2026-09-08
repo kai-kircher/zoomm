@@ -48,6 +48,7 @@
         <button data-preset="auxetic">Auxetic scooter</button>
         <button data-preset="graded">Graded-ring airless</button>
         <button data-preset="organic">Voronoi show wheel</button>
+        <button data-preset="dual">TPU tread, rigid core</button>
         <button data-preset="bike">Round-section bike tire</button>
         <button data-preset="tiny">100 mm test</button>
       </div>
@@ -63,7 +64,7 @@
       </label>
       <label>Diameter <input id="diameter" type="number" step="any" value="355.6" /></label>
       <label>Width <input id="width" type="number" step="any" value="50" /></label>
-      <label>Material
+      <label data-show="multiMaterial:false">Material
         <select id="material">
           <option value="petg">PETG</option>
           <option value="pla">PLA</option>
@@ -71,6 +72,32 @@
           <option value="tpu">TPU (flexible)</option>
         </select>
       </label>
+      <label class="chk"><input id="multiMaterial" type="checkbox" /> Multi-material (per zone)</label>
+      <label data-show="multiMaterial:true">Tread + rim
+        <select id="matTread">
+          <option value="petg">PETG</option>
+          <option value="pla">PLA</option>
+          <option value="abs">ABS / ASA</option>
+          <option value="tpu">TPU (flexible)</option>
+        </select>
+      </label>
+      <label data-show="multiMaterial:true">Web / spokes
+        <select id="matWeb">
+          <option value="petg">PETG</option>
+          <option value="pla">PLA</option>
+          <option value="abs">ABS / ASA</option>
+          <option value="tpu">TPU (flexible)</option>
+        </select>
+      </label>
+      <label data-show="multiMaterial:true">Hub
+        <select id="matHub">
+          <option value="petg">PETG</option>
+          <option value="pla">PLA</option>
+          <option value="abs">ABS / ASA</option>
+          <option value="tpu">TPU (flexible)</option>
+        </select>
+      </label>
+      <p class="hint" data-show="multiMaterial:true">Each piece exports as one file per filament, split at the cylinders between the bands. Load a piece's files together as one object with multiple parts.</p>
     </section>
 
     <section>

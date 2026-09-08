@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { planWheel } from '../src/lib/wheel.js';
-import { generateSource, RUNTIME_FILES } from '../src/lib/occgen.js';
+import { generateSource, RUNTIME_FILES, zoneStem } from '../src/lib/occgen.js';
 import { zipStore, crc32 } from '../src/lib/zip.js';
 
 const CONFIGS = [
@@ -23,6 +23,10 @@ const CONFIGS = [
   ['segmented bolt solid slick', { bore: { type: 'bolt' }, infill: 'solid', tread: 'slick' }],
   ['crowned lugged', { diameter: 200, width: 40, infill: 'solid', tread: 'lugged', profile: { shape: 'crowned', crownDrop: 5 } }],
   ['round bike tire', { diameter: 200, width: 28, infill: 'honeycomb', tread: 'chevron', treadAngle: 35, treadDepth: 2.2, profile: { shape: 'round' } }],
+  // Two filaments and three, so every test in this file also runs against a
+  // piece that is written out as several bodies rather than one.
+  ['tpu tread on a rigid core', { materials: { tread: 'tpu' } }],
+  ['three filaments, crowned', { diameter: 200, width: 40, infill: 'honeycomb', profile: { shape: 'crowned' }, materials: { tread: 'tpu', web: 'petg', hub: 'abs' } }],
 ];
 
 const pieceFiles = (files) => files.filter((f) => f.kind === 'source');
@@ -60,7 +64,14 @@ for (const [name, cfg] of CONFIGS) {
       const src = f.content;
       assert.ok(!/NaN|Infinity|undefined/.test(src), 'no bad numbers');
       assert.ok(!/\d[eE][+-]?\d/.test(src), 'no exponent-notation numbers');
-      assert.match(src, /^from wheelwright_occ import build, save$/m);
+      // A piece printed in one filament is one solid and one write; in
+      // several it is split first, so it asks for a different entry point.
+      assert.match(
+        src,
+        plan.multiMaterial
+          ? /^from wheelwright_occ import build, save_zones$/m
+          : /^from wheelwright_occ import build, save$/m
+      );
       assert.match(src, /^W = [\d.]+$/m);
 
       const sections = readLiteral(src, 'SECTIONS');
@@ -239,4 +250,95 @@ test('zip writer produces a valid archive skeleton', () => {
   assert.equal(zip.readUInt32LE(zip.length - 22), 0x06054b50, 'EOCD magic');
   assert.equal(zip.readUInt16LE(zip.length - 22 + 10), 2, 'entry count');
   assert.equal(crc32(Buffer.from('123456789')), 0xcbf43926, 'crc32 reference vector');
+});
+
+// ---------------------------------------------------------------------------
+// Material zones
+// ---------------------------------------------------------------------------
+
+test('a single-material wheel emits exactly what it always did', () => {
+  for (const [name, cfg] of CONFIGS) {
+    const plan = planWheel(cfg);
+    if (plan.multiMaterial) continue;
+    for (const f of pieceFiles(generateSource(plan))) {
+      assert.ok(!/^ZONES = /m.test(f.content), `${name}: no zone block`);
+      assert.ok(/^from wheelwright_occ import build, save$/m.test(f.content), `${name}: imports save`);
+      assert.ok(/save\(build\(SECTIONS, CUTTERS, W\), "piece-[A-Z]"\)/.test(f.content), `${name}: writes one body`);
+    }
+  }
+});
+
+test('a multi-material wheel emits the zones it planned, and asks for the split', () => {
+  for (const [name, cfg] of CONFIGS) {
+    const plan = planWheel(cfg);
+    if (!plan.multiMaterial) continue;
+    for (const f of pieceFiles(generateSource(plan))) {
+      const zones = readLiteral(f.content, 'ZONES');
+      assert.deepEqual(
+        zones.map((z) => [z.key, z.material]),
+        plan.zones.map((z) => [z.key, z.material]),
+        `${name}: the emitted zones are the planned ones`
+      );
+      // The kernel intersects the piece with each of these in turn and then
+      // checks the bodies add back up to it, so a gap here is a build failure
+      // rather than a silently thinner wheel — but it should never get there.
+      assert.equal(zones[0].r0, 0, `${name}: the innermost body starts at the axle`);
+      for (let i = 1; i < zones.length; i++) {
+        assert.equal(zones[i].r0, zones[i - 1].r1, `${name}: bodies share their boundary`);
+      }
+      assert.ok(zones[zones.length - 1].r1 > plan.radii.R, `${name}: the outermost clears the tread`);
+      for (const z of zones) assert.equal(z.seam, plan.zones[0].seam, `${name}: one seam angle`);
+      assert.ok(/^from wheelwright_occ import build, save_zones$/m.test(f.content), `${name}: imports save_zones`);
+      assert.ok(
+        /save_zones\(build\(SECTIONS, CUTTERS, W\), ZONES, W, "piece-[A-Z]"\)/.test(f.content),
+        `${name}: splits before writing`
+      );
+    }
+  }
+});
+
+test('the manifest names the files the kernel is going to write', () => {
+  const plan = planWheel({ materials: { tread: 'tpu', web: 'petg', hub: 'abs' } });
+  const files = generateSource(plan);
+  const manifest = JSON.parse(files.find((f) => f.kind === 'manifest').content);
+  assert.deepEqual(
+    manifest.materialZones.map((z) => z.material),
+    ['abs', 'petg', 'tpu']
+  );
+  for (const [i, entry] of manifest.pieces.entries()) {
+    const label = plan.uniquePieces[i].label;
+    assert.equal(entry.stl, undefined, 'a multi-material piece has bodies, not one file');
+    assert.deepEqual(
+      entry.bodies.map((b) => b.stl),
+      plan.zones.map((z) => `${zoneStem(label, z)}.stl`)
+    );
+    // `zone_stem` in wheelwright_occ.py builds the same name from the same
+    // fields; if the two ever drift, the manifest points at files that do not
+    // exist. Spelling it out here is the cheapest place to notice.
+    assert.equal(entry.bodies[0].stl, `piece-${label}-hub-abs.stl`);
+  }
+  // A single-material wheel keeps naming its two files directly.
+  const one = JSON.parse(generateSource(planWheel({})).find((f) => f.kind === 'manifest').content);
+  assert.equal(one.materialZones, undefined);
+  assert.equal(one.pieces[0].stl, 'piece-A.stl');
+  assert.equal(one.pieces[0].bodies, undefined);
+});
+
+test('the assembly guide tells you which spool each body comes off', () => {
+  const plan = planWheel({ materials: { tread: 'tpu', web: 'petg', hub: 'abs' } });
+  const md = generateSource(plan).find((f) => f.name === 'ASSEMBLY.md').content;
+  assert.match(md, /## Materials/);
+  for (const z of plan.zones) {
+    assert.ok(md.includes(`${zoneStem('A', z)}.stl`), `names ${z.key}'s file`);
+  }
+  // The weak pairing has to be called out where the two meet, not only in the
+  // warnings — that section is what someone loading the slicer is reading.
+  assert.match(md, /\*\*ABS → PETG\*\* at Ø[\d.]+ mm — \*bonds poorly\.\*/);
+  assert.match(md, /\*\*PETG → TPU\*\* at Ø[\d.]+ mm — \*bonds well\.\*/);
+  // And the seams are two different glue-ups.
+  assert.match(md, /the \*\*hub\*\* dovetail is ABS on both sides/);
+  assert.match(md, /the \*\*rim\*\* dovetail is TPU on both sides/);
+
+  const single = generateSource(planWheel({})).find((f) => f.name === 'ASSEMBLY.md').content;
+  assert.ok(!single.includes('## Materials'), 'one filament needs no materials section');
 });

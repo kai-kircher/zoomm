@@ -6,9 +6,11 @@
     python build.py . --json             # machine-readable summary on stdout
 
 Each `piece-*.py` in the directory declares `W`, `SECTIONS` and `CUTTERS`; this
-runner imports them and hands them to `wheelwright_occ.build`. The Wheelwright
-server runs this exact script on the exact files it gives you, so a bundle you
-download builds the same solids the app does.
+runner imports them and hands them to `wheelwright_occ.build`. A piece printed
+in more than one filament also declares `ZONES`, and is written out as one file
+per material instead of one per piece. The Wheelwright server runs this exact
+script on the exact files it gives you, so a bundle you download builds the
+same solids the app does.
 """
 
 import argparse
@@ -75,15 +77,32 @@ def main(argv=None):
         try:
             mod = load_piece(path)
             shape = wheelwright_occ.build(mod.SECTIONS, mod.CUTTERS, mod.W)
-            written = wheelwright_occ.save(shape, stem, formats, out)
+            # One body, or one per material — either way every body written has
+            # to be a solid in its own right, so `valid` covers all of them.
+            zones = getattr(mod, "ZONES", None)
+            bodies = (wheelwright_occ.split_zones(shape, zones, mod.W)
+                      if zones else [(None, shape)])
+            written = []
+            for zone, body in bodies:
+                name = stem if zone is None else wheelwright_occ.zone_stem(stem, zone)
+                written += wheelwright_occ.save(body, name, formats, out)
             entry = {
                 "piece": stem,
                 "ok": True,
                 "seconds": round(time.time() - started, 2),
                 "volumeMm3": round(wheelwright_occ.volume(shape), 1),
-                "valid": wheelwright_occ.is_valid(shape),
+                "valid": all(wheelwright_occ.is_valid(b) for _, b in bodies),
                 "files": [os.path.basename(w) for w in written],
             }
+            if zones:
+                entry["bodies"] = [
+                    {
+                        "key": z["key"],
+                        "material": z["material"],
+                        "volumeMm3": round(wheelwright_occ.volume(b), 1),
+                    }
+                    for z, b in bodies
+                ]
         except Exception as exc:  # a bad piece must not lose the good ones
             failed += 1
             entry = {

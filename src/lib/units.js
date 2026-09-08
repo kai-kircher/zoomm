@@ -38,6 +38,8 @@ export const LENGTH_INPUTS = Object.freeze([
   { id: 'axCellSize', path: ['auxetic', 'cellSize'] },
   { id: 'axWall', path: ['auxetic', 'wall'] },
   { id: 'axCornerRadius', path: ['auxetic', 'cornerRadius'] },
+  { id: 'grWall', path: ['graded', 'wall'] },
+  { id: 'grCornerRadius', path: ['graded', 'cornerRadius'] },
   { id: 'voWall', path: ['voronoi', 'wall'] },
   { id: 'voCornerRadius', path: ['voronoi', 'cornerRadius'] },
   { id: 'printerX', path: ['printer', 'x'] },

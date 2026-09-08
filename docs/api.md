@@ -229,7 +229,7 @@ Errors are JSON with a machine-readable `code` and a human `how`:
 }
 ```
 
-**Timing.** The build is synchronous, local, and fast: across the 22-configuration
+**Timing.** The build is synchronous, local, and fast: across the 24-configuration
 matrix in `scripts/validate-occ.js`, pieces take roughly 0.1–6 s each, and a
 whole wheel — every unique piece, in both formats — lands in a few seconds.
 Lofted cross-sections are at the slow end of that range, not a different order
@@ -254,7 +254,7 @@ named by `units` (`"mm"` default, `"in"` accepted and converted).
     "web": "",                  //   the spokes / airless web
     "hub": ""                   //   the hub ring around the bore
   },                            // "" (or absent, or unknown) follows `material`
-  "infill": "spokes",           // solid | spokes | honeycomb | flexweb | lattice | auxetic | voronoi
+  "infill": "spokes",           // solid | spokes | honeycomb | flexweb | lattice | auxetic | graded | voronoi
   "spokeCount": 0,              // 0 = auto; snapped to a multiple of the segment count
   "tread": "lugged",            // slick | ribbed | lugged | diamond | chevron | angled
   "treadDepth": 3.5,            // 0.8 mm – 6 % of diameter
@@ -275,6 +275,7 @@ named by `units` (`"mm"` default, `"in"` accepted and converted).
                  "cellShape": "hex", "cornerRadius": 0, "maxCells": 64 },
   "lattice":   { "rows": 0, "struts": 0, "strutWidth": 4, "cornerRadius": 1.5 },
   "auxetic":   { "rings": 0, "cellSize": 0, "wall": 3, "waist": 0.45, "cornerRadius": 1.2 },
+  "graded":    { "rings": 0, "cells": 0, "wall": 2.6, "cellShape": "hex", "grade": 1, "swirl": 0, "cornerRadius": 1.2 },
   "voronoi":   { "cells": 0, "wall": 3, "seed": 1, "cornerRadius": 1.2 },
   "printer": { "x": 220, "y": 220, "z": 250, "margin": 10 },
   "joint": { "clearance": 0.15 },   // 0.05–0.6 mm per side

@@ -101,6 +101,7 @@ Everything replans live (120 ms debounce) — there is no "generate" button.
 | **Bolt-on caster** | Bolts to a plate or caster fork | Ø160 × 45, PETG, honeycomb, 4-bolt hub |
 | **Interlaced airless** | The criss-cross airless-tire look | Ø260 × 55, TPU, 3-row lattice |
 | **Auxetic scooter** | Re-entrant lattice, negative Poisson's ratio | Ø200 × 40, TPU, 2 rings, waist 0.4 |
+| **Graded-ring airless** | Rings of cells growing outward — the moulded-airless look | Ø200 × 45, PETG, 3 rings, 5-bolt hub |
 | **Voronoi show wheel** | Organic cell web, display piece | Ø180 × 40, PETG, voronoi seed 7 |
 | **100 mm test** | Small, fast print for checking joints/fit | Ø100 × 25, PLA, plain 8 mm bore |
 
@@ -129,7 +130,7 @@ on the number you typed rather than 2.59999.
 
 | Control | Notes |
 | --- | --- |
-| Web style | `spokes`, `solid`, `honeycomb`, `flexweb`, `lattice`, `auxetic`, `voronoi` — see [§5](#5-choosing-a-web). |
+| Web style | `spokes`, `solid`, `honeycomb`, `flexweb`, `lattice`, `auxetic`, `graded`, `voronoi` — see [§5](#5-choosing-a-web). |
 | *(per-style group)* | Each style reveals its own parameters; every length follows the units selector. Full tables in the [README](../README.md#the-airless-webs). |
 | Tread | `lugged` (straight bars), `angled`, `chevron` (V-bar), `ribbed` (circumferential grooves), `diamond` (bars + grooves), `slick`. |
 | Tread depth | 0.8 mm – 6 % of diameter. Ignored for slick. |
@@ -236,6 +237,7 @@ planner made for you.
 | Springy airless wheel, simple | `flexweb` | Curved flex slots — long, compliant ribs. |
 | Springy airless wheel, structural | `lattice` | Crossing strut families; 1 row gives a chevron truss. |
 | Compliance that pulls inward under load | `auxetic` | Re-entrant cells, negative Poisson's ratio. |
+| The moulded airless-tire look | `graded` | Rings of cells that grow with the radius: small at the hub, large at the rim. Hex, rectangular or diamond cells, leanable into a turbine web. |
 | A show piece | `voronoi` | Organic irregular cells, reproducible from a seed. |
 
 Notes that apply to all of them:
@@ -426,7 +428,25 @@ nearly a plain hex (stiffer). Watch the note about walls under three extrusion
 widths — a 2 mm wall in TPU on a 0.4 nozzle is fragile in exactly the place the
 wheel flexes most.
 
-### 9.5 Replacement wheel for a machine you own
+### 9.5 Cart wheel with the moulded-airless look
+
+*Preset: Graded-ring airless.* Ø200 × 45, PETG, 3 rings, 5 bolts on Ø80 BCD.
+
+`graded` is the web to reach for when you want the pattern most airless tires
+and robot wheels actually carry: rings of cells, small around the hub and
+growing as the radius does. `grade` is the knob for how much they grow — `1`
+grows them in both directions at once, `0` keeps every ring the same height and
+only widens the cells across. `rings` and `cells` set how fine the pattern is;
+`cellShape` swaps the hexagons for straight-sided cells or for diamonds, which
+leave a triangulated truss between them. `swirl` leans the whole web off radial
+for a turbine look — 20–30° reads clearly without costing many cells.
+
+A wheel with a small hub and a big rim grades hard: the rim cells can end up
+several times the size of the hub ones, and the innermost ring may grade down
+to cells too small to cut, which the build notes will say. Raise `rings`, raise
+`cells`, or pull `grade` back if you want it gentler.
+
+### 9.6 Replacement wheel for a machine you own
 
 Measure three things: the shaft (diameter, and key or flat if it has one), the
 wheel's outer diameter, and its width. Type them in, pick the hub type that
@@ -434,7 +454,7 @@ matches the shaft, set your bed, and check `fits printer`. Set bore clearance
 from experience with your printer (0.2 mm is a good first guess; 0.1 for a
 tight sliding fit on a well-tuned machine).
 
-### 9.6 A wheel bigger than your printer, on purpose
+### 9.7 A wheel bigger than your printer, on purpose
 
 Set diameter 700 mm and a 220 bed. You'll get the `even 16 segments do not fit`
 warning: the depth of a pie slice is ~R regardless of N. The honest options are

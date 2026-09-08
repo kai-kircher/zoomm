@@ -51,6 +51,12 @@ const PRESETS = {
     bore: { type: 'hex', hexAcrossFlats: 13 },
     auxetic: { rings: 2, wall: 2.6, waist: 0.4, cornerRadius: 1.2 },
   },
+  graded: {
+    units: 'mm', diameter: 200, width: 45, material: 'petg', infill: 'graded',
+    tread: 'ribbed', treadDepth: 2.5,
+    bore: { type: 'bolt', boltCount: 5, boltCircle: 80, boltHoleDia: 5.5, pilotDia: 30 },
+    graded: { rings: 3, wall: 2.6, cellShape: 'hex', grade: 1, swirl: 0, cornerRadius: 1.6 },
+  },
   organic: {
     units: 'mm', diameter: 180, width: 40, material: 'petg', infill: 'voronoi',
     tread: 'slick', treadDepth: 2,
@@ -156,6 +162,15 @@ const STYLE_FIELDS = {
     wall: { id: 'axWall' },
     waist: { id: 'axWaist' },
     cornerRadius: { id: 'axCornerRadius' },
+  },
+  graded: {
+    rings: { id: 'grRings' },
+    cells: { id: 'grCells' },
+    wall: { id: 'grWall' },
+    cellShape: { id: 'grCellShape' },
+    grade: { id: 'grGrade' },
+    swirl: { id: 'grSwirl' },
+    cornerRadius: { id: 'grCornerRadius' },
   },
   voronoi: {
     cells: { id: 'voCells' },
@@ -370,6 +385,10 @@ function describeInfill(i) {
   }
   if (i.style === 'auxetic') {
     return `auxetic — ${i.rings} ring${i.rings === 1 ? '' : 's'}, ${i.cellsPerSegment}/segment, ${i.cellWidth}×${i.cellHeight} mm cells, ${i.wall} mm wall`;
+  }
+  if (i.style === 'graded') {
+    const lean = i.swirl ? `, ${Math.abs(i.swirl)}° swirl` : '';
+    return `graded rings — ${i.rings} ring${i.rings === 1 ? '' : 's'}, ${i.cellsPerSegment}/segment, ${i.cellShape} cells ${i.innerCell} → ${i.outerCell} mm wide, ${i.wall} mm wall${lean}`;
   }
   if (i.style === 'voronoi') {
     return `voronoi — ${i.cellsPerSegment} cells/segment, ${i.wall} mm wall, seed ${i.seed}`;

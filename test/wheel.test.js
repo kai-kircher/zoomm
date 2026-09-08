@@ -402,7 +402,7 @@ test('honeycomb cells never overlap and stay inside the web band', () => {
   }
 });
 
-// --- chart-drawn webs: lattice, auxetic, voronoi ---------------------------
+// --- chart-drawn webs: lattice, auxetic, graded, voronoi -------------------
 //
 // All three are laid out in the unrolled web band and mapped back through
 // Φ(θ, t) = polar(rWebIn + t·bandW, θ). Φ is injective on the strip, so cells
@@ -410,7 +410,7 @@ test('honeycomb cells never overlap and stay inside the web band', () => {
 // finished millimetre geometry proves the walls survive the mapping, the
 // chording and the corner fillets. These tests measure the emitted loops.
 
-const CELL_PREFIX = { lattice: 'lat', auxetic: 'aux', voronoi: 'vor' };
+const CELL_PREFIX = { lattice: 'lat', auxetic: 'aux', graded: 'grd', voronoi: 'vor' };
 const cellsOf = (plan) => {
   const pre = CELL_PREFIX[plan.infillInfo.style];
   return pre ? plan.uniquePieces[0].cutters.filter((c) => c.id.startsWith(pre)) : [];
@@ -528,6 +528,25 @@ const WEB_CASES = [
   ['auxetic, small cells', 3, { diameter: 400, infill: 'auxetic', auxetic: { cellSize: 10 }, printer: BIG_BED }],
   ['auxetic, one piece', 3, { diameter: 160, width: 45, infill: 'auxetic', tread: 'slick', bore: { type: 'bolt' } }],
   ['auxetic, sixteen segments', 3, { diameter: 700, infill: 'auxetic', segmentsOverride: 16 }],
+  ['graded, defaults', 2.6, { infill: 'graded' }],
+  ['graded, one ring', 2.6, { infill: 'graded', graded: { rings: 1 } }],
+  ['graded, eight rings', 2.6, { infill: 'graded', graded: { rings: 8 } }],
+  ['graded, uniform rings', 2.6, { infill: 'graded', graded: { grade: 0 } }],
+  ['graded, half graded', 2.6, { infill: 'graded', graded: { grade: 0.5 } }],
+  ['graded, rect cells', 2.6, { infill: 'graded', graded: { cellShape: 'rect' } }],
+  ['graded, diamond cells', 2.6, { infill: 'graded', graded: { cellShape: 'diamond' } }],
+  ['graded, thick wall', 6, { infill: 'graded', graded: { wall: 6 } }],
+  ['graded, sharp corners', 2.6, { infill: 'graded', graded: { cornerRadius: 0 } }],
+  ['graded, absurd fillet', 2.6, { infill: 'graded', graded: { cornerRadius: 40 } }],
+  ['graded, dense cells', 2.6, { diameter: 400, infill: 'graded', graded: { cells: 60 }, printer: BIG_BED }],
+  ['graded, coarse cells', 2.6, { diameter: 400, infill: 'graded', graded: { cells: 8 }, printer: BIG_BED }],
+  ['graded, swirled', 2.6, { infill: 'graded', graded: { swirl: 25 } }],
+  ['graded, swirled the other way', 2.6, { infill: 'graded', graded: { swirl: -60, cellShape: 'rect' } }],
+  ['graded, swirled diamonds, uniform', 2.6, { infill: 'graded', graded: { swirl: 40, cellShape: 'diamond', grade: 0 } }],
+  ['graded, one piece', 2.6, { diameter: 160, width: 45, infill: 'graded', tread: 'slick', bore: { type: 'bolt' } }],
+  ['graded, one piece swirled', 2.6, { diameter: 160, width: 45, infill: 'graded', tread: 'slick', bore: { type: 'bolt' }, graded: { swirl: 30 } }],
+  ['graded, two segments', 2.6, { diameter: 300, infill: 'graded', segmentsOverride: 2 }],
+  ['graded, sixteen segments', 2.6, { diameter: 700, infill: 'graded', segmentsOverride: 16 }],
   ['voronoi, defaults', 3, { infill: 'voronoi' }],
   ['voronoi, another seed', 3, { infill: 'voronoi', voronoi: { seed: 99 } }],
   ['voronoi, few cells', 3, { infill: 'voronoi', voronoi: { cells: 8 } }],
@@ -603,6 +622,136 @@ test('auxetic cells are re-entrant: the waist pinches inside the cell edges', ()
   }
 });
 
+// --- graded rings ----------------------------------------------------------
+//
+// The pattern's whole point is that cells grow with the radius, so that is
+// what gets measured: on the finished loops, ring by ring.
+
+// A cell's ring geometry, read off its emitted loop: the radii it spans and
+// the tangential width at each end and at its widest.
+function cellShape(loop) {
+  const pol = loop.map(([x, y]) => [Math.hypot(x, y), Math.atan2(y, x)]);
+  const rMin = Math.min(...pol.map((p) => p[0]));
+  const rMax = Math.max(...pol.map((p) => p[0]));
+  // Tangential extent of a set of loop points, as an angle and as arc.
+  const spreadAng = (pts) => {
+    if (pts.length < 2) return 0;
+    const th = pts.map((p) => p[1]);
+    return Math.max(...th) - Math.min(...th);
+  };
+  const spread = (pts) => spreadAng(pts) * (pts.reduce((s, p) => s + p[0], 0) / (pts.length || 1));
+  const band = Math.max(rMax - rMin, 1e-9);
+  const near = (r0) => pol.filter((p) => Math.abs(p[0] - r0) < 0.02 * band);
+  // Widest extent anywhere in the cell. Held as an angle as well as an arc:
+  // radial sides diverge, so even a cell of constant angular width measures
+  // wider in millimetres at its outer end than at its inner one.
+  let waist = 0;
+  let waistAng = 0;
+  for (let i = 0; i < 24; i++) {
+    const r0 = rMin + (band * (i + 0.5)) / 24;
+    const slice = pol.filter((p) => Math.abs(p[0] - r0) < band / 24);
+    waist = Math.max(waist, spread(slice));
+    waistAng = Math.max(waistAng, spreadAng(slice));
+  }
+  const mid = (pts) => {
+    const th = pts.map((p) => p[1]);
+    return [pts.reduce((s, p) => s + p[0], 0) / pts.length, (Math.max(...th) + Math.min(...th)) / 2];
+  };
+  return {
+    rMin,
+    rMax,
+    rMid: (rMin + rMax) / 2,
+    height: band,
+    waist,
+    outerEnd: spreadAng(near(rMax)) / waistAng,
+    innerEnd: spreadAng(near(rMin)) / waistAng,
+    outerMid: mid(near(rMax)),
+    innerMid: mid(near(rMin)),
+  };
+}
+
+// Cells grouped into their rings, innermost first — cells of one ring share a
+// radial band, so a gap in the sorted mid radii separates two rings.
+function ringsOf(plan) {
+  const cells = cellsOf(plan).map((c) => cellShape(loopOf(c)));
+  cells.sort((a, b) => a.rMid - b.rMid);
+  const rings = [[cells[0]]];
+  for (let i = 1; i < cells.length; i++) {
+    if (cells[i].rMin > rings[rings.length - 1][0].rMax - 0.01) rings.push([]);
+    rings[rings.length - 1].push(cells[i]);
+  }
+  return rings;
+}
+
+test('graded cells grow with the radius — in both directions, or only across', () => {
+  const cfg = (graded) => ({ diameter: 400, width: 60, infill: 'graded', tread: 'slick', printer: BIG_BED, graded });
+  const full = ringsOf(planWheel(cfg({ rings: 4 })));
+  assert.equal(full.length, 4, 'four rings of cells');
+  for (let i = 1; i < full.length; i++) {
+    const [inner, outer] = [full[i - 1][0], full[i][0]];
+    assert.ok(outer.waist > inner.waist * 1.05, `ring ${i} is wider than the one inside it (${outer.waist.toFixed(1)} > ${inner.waist.toFixed(1)})`);
+    assert.ok(outer.height > inner.height * 1.05, `ring ${i} is taller than the one inside it (${outer.height.toFixed(1)} > ${inner.height.toFixed(1)})`);
+  }
+  assert.ok(full[3][0].waist > full[0][0].waist * 1.8, 'the rim cells are far bigger than the hub cells');
+
+  // grade: 0 keeps every ring the same height. The cells still widen — one
+  // angular pitch buys more arc the further out it is read — but they do it
+  // by getting squatter, not by growing.
+  const flat = ringsOf(planWheel(cfg({ rings: 4, grade: 0 })));
+  assert.equal(flat.length, 4);
+  const heights = flat.map((r) => r[0].height);
+  assert.ok(Math.max(...heights) - Math.min(...heights) < 0.5, `uniform rings stay one height (${heights.map((h) => h.toFixed(1))})`);
+  assert.ok(flat[3][0].waist > flat[0][0].waist * 1.8, 'uniform rings still widen with the radius');
+});
+
+test('graded cell shapes: a diamond points, a rect runs straight, a hex is between', () => {
+  const cfg = (cellShape) => ({
+    diameter: 400, width: 60, infill: 'graded', tread: 'slick', printer: BIG_BED,
+    graded: { rings: 3, cornerRadius: 0, cellShape },
+  });
+  const endRatio = (shape) => {
+    const cells = ringsOf(planWheel(cfg(shape))).flat();
+    return cells.reduce((s, c) => s + (c.outerEnd + c.innerEnd) / 2, 0) / cells.length;
+  };
+  assert.ok(endRatio('diamond') < 0.05, 'diamond cells close to a point at both ends');
+  assert.ok(Math.abs(endRatio('rect') - 1) < 0.05, 'rect cells are as wide at the ends as at the waist');
+  const hex = endRatio('hex');
+  assert.ok(hex > 0.4 && hex < 0.7, `hex cells narrow towards the ends but keep a flat there (${hex.toFixed(2)})`);
+});
+
+test('swirl leans every cell off radial by the angle asked for', () => {
+  for (const swirl of [-40, 0, 20]) {
+    const plan = planWheel({
+      diameter: 400, width: 60, infill: 'graded', tread: 'slick', printer: BIG_BED,
+      graded: { rings: 3, swirl },
+    });
+    assert.equal(plan.infillInfo.swirl, swirl);
+    for (const c of ringsOf(plan).flat()) {
+      // The cell's centre line, from end to end: how far it travels around
+      // against how far it climbs.
+      const dTh = c.outerMid[1] - c.innerMid[1];
+      const arc = dTh * c.rMid;
+      const lean = (Math.atan2(arc, c.rMax - c.rMin) * 180) / Math.PI;
+      assert.ok(Math.abs(lean - swirl) < 4, `cell leans ${lean.toFixed(1)}°, asked for ${swirl}°`);
+    }
+  }
+});
+
+test('the cell count is a target the rings hold to, and rings are settable', () => {
+  const one = { diameter: 160, width: 45, infill: 'graded', tread: 'slick', bore: { type: 'bolt' } };
+  const plan = planWheel({ ...one, graded: { cells: 24, rings: 2 } });
+  assert.equal(plan.N, 1, 'a one-piece wheel has no seams to interrupt the rings');
+  assert.equal(plan.infillInfo.cellsPerTurn, 24);
+  assert.equal(plan.infillInfo.rings, 2);
+  for (const ring of ringsOf(plan)) assert.equal(ring.length, 24, 'every ring carries the count asked for');
+  // Asking for more cells makes them smaller, not merely more numerous.
+  const dense = planWheel({ ...one, graded: { cells: 40, rings: 2 } });
+  assert.ok(
+    dense.infillInfo.innerCell < plan.infillInfo.innerCell * 0.75,
+    `40 cells around are narrower than 24 (${dense.infillInfo.innerCell} vs ${plan.infillInfo.innerCell} mm)`
+  );
+});
+
 test('voronoi is reproducible from its seed and genuinely reseeds', () => {
   const cfg = (seed) => ({ diameter: 400, width: 60, infill: 'voronoi', tread: 'slick', voronoi: { seed, cells: 18 }, printer: BIG_BED });
   const a = planWheel(cfg(4));
@@ -627,7 +776,7 @@ test('voronoi is reproducible from its seed and genuinely reseeds', () => {
 });
 
 test('every chart web repeats per segment, so pieces still dedupe', () => {
-  for (const infill of ['lattice', 'auxetic', 'voronoi']) {
+  for (const infill of ['lattice', 'auxetic', 'graded', 'voronoi']) {
     // A plain bore has no hub features, so the web is the only thing that
     // could make two pieces differ.
     const plan = planWheel({ diameter: 400, width: 60, infill, tread: 'slick', bore: { type: 'plain', diameter: 20 } });
@@ -638,7 +787,7 @@ test('every chart web repeats per segment, so pieces still dedupe', () => {
 });
 
 test('a web band too narrow for the pattern falls back to solid and says so', () => {
-  for (const infill of ['lattice', 'auxetic', 'voronoi']) {
+  for (const infill of ['lattice', 'auxetic', 'graded', 'voronoi']) {
     // Big bolt circle + small wheel leaves almost nothing between hub and rim.
     const plan = planWheel({ diameter: 150, width: 30, infill, tread: 'slick', bore: { type: 'bolt', boltCount: 4, boltCircle: 100, boltHoleDia: 6, pilotDia: 20 } });
     assert.ok(plan.radii.rWebOut - plan.radii.rWebIn < 12, 'the repro really does squeeze the web band');
@@ -770,7 +919,7 @@ test('every tread × profile × web × hub combination yields closed, congruent 
   let count = 0;
   for (const tread of ['slick', 'ribbed', 'lugged', 'diamond', 'chevron', 'angled']) {
     for (const shape of ['flat', 'crowned', 'round']) {
-      for (const infill of ['solid', 'spokes', 'honeycomb', 'lattice', 'auxetic', 'voronoi']) {
+      for (const infill of ['solid', 'spokes', 'honeycomb', 'lattice', 'auxetic', 'graded', 'voronoi']) {
         for (const bore of ['keyed', 'hex', 'dbore', 'bolt']) {
           for (const diameter of [120, 355.6]) {
             const where = `${tread}/${shape}/${infill}/${bore}/Ø${diameter}`;
@@ -853,7 +1002,7 @@ test('nothing the planner cuts ever crosses a material boundary', () => {
   const problems = [];
   let checked = 0;
   for (const diameter of [80, 120, 200, 355.6, 700]) {
-    for (const infill of ['solid', 'spokes', 'honeycomb', 'flexweb', 'lattice', 'auxetic', 'voronoi']) {
+    for (const infill of ['solid', 'spokes', 'honeycomb', 'flexweb', 'lattice', 'auxetic', 'graded', 'voronoi']) {
       for (const tread of ['slick', 'lugged', 'ribbed', 'chevron']) {
         for (const type of ['keyed', 'plain', 'hex', 'dbore', 'bolt']) {
           for (const shape of ['flat', 'crowned', 'round']) {

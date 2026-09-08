@@ -30,10 +30,10 @@ and the glue-up instructions.
 - **Pick a cross-section**: flat cylindrical, crowned by a settable drop, or a full round
   bicycle-tire section — cut as an exact arc of the section circle, not approximated. The tread
   rides the curve, so bars fade out towards the shoulders the way a moulded tire's do.
-- **Pick a web**: solid, spokes, or one of the four [airless patterns](#the-airless-webs) —
-  honeycomb, interlaced lattice, auxetic re-entrant, or voronoi. Each carries its own parameter
-  group (cell size, wall, orientation, corner rounding…) and each guarantees a minimum wall
-  everywhere, by construction.
+- **Pick a web**: solid, spokes, or one of the five [airless patterns](#the-airless-webs) —
+  honeycomb, interlaced lattice, auxetic re-entrant, graded rings, or voronoi. Each carries its
+  own parameter group (cell size, wall, orientation, corner rounding…) and each guarantees a
+  minimum wall everywhere, by construction.
 - **Give it your print envelope**: bed X/Y, height Z, edge margin.
 - **It plans the build**: picks the smallest segment count whose pieces fit the bed, sizes
   slide-together dovetails into the rim and hub rings, keeps structural webs clear of the seams,
@@ -74,8 +74,8 @@ you download the source bundle and run `pip install cadquery-ocp && python build
 which is the same code, on the same files, that the server would have run.
 
 ```sh
-npm test           # 162 unit tests: chunking math, joints, dedupe, piece profiles, every web pattern's wall and overlap guarantees, material-zone boundaries, emitted-bundle geometry
-npm run validate   # regenerates a 22-config matrix and builds every piece through the real kernel
+npm test           # 194 unit tests: chunking math, joints, dedupe, piece profiles, every web pattern's wall and overlap guarantees, material-zone boundaries, emitted-bundle geometry
+npm run validate   # regenerates a 24-config matrix and builds every piece through the real kernel
 ```
 
 ## Documentation
@@ -152,20 +152,22 @@ segment, so a web never costs you a unique piece and never leaves a joint half-c
 ## The airless webs
 
 Search "airless tire" and you get four looks: honeycomb, criss-crossing curved struts, chevron
-trusses, and the auxetic lattices out of the research papers — plus the organic voronoi webs the
-3D-printing crowd likes. Wheelwright models all of them. Pick a web style in the sidebar and its
-own parameter group appears; every length follows the units selector.
+trusses, and the auxetic lattices out of the research papers — plus the rings of cells that grow
+towards the rim on most moulded ones, and the organic voronoi webs the 3D-printing crowd likes.
+Wheelwright models all of them. Pick a web style in the sidebar and its own parameter group
+appears; every length follows the units selector.
 
 | Style | The look | Knobs |
 |---|---|---|
 | `honeycomb` | Hex cells on a true hex lattice — the Polaris/Resilient NPT look. | [below](#honeycomb) |
 | `lattice` | Two mirrored families of struts crossing in an X, diamonds slung between them. One row degenerates to a chevron/V-truss. | [below](#interlaced-lattice) |
 | `auxetic` | Re-entrant bow-tie cells in a brick bond: the web pulls *inward* when you squeeze it. | [below](#auxetic-re-entrant) |
+| `graded` | Concentric rings of hex, rectangular or diamond cells that grow with the radius — small at the hub, large at the rim. Lean them for a turbine web. | [below](#graded-rings) |
 | `voronoi` | Organic irregular cells from a seeded tessellation. | [below](#voronoi) |
 
 ### How the curved ones are built
 
-Honeycomb is a straight lattice stamped onto an annulus. The other three curve with the wheel, and
+Honeycomb is a straight lattice stamped onto an annulus. The other four curve with the wheel, and
 they all get there the same way — by unrolling the web band into a rectangle, drawing the pattern
 there in plain straight-line geometry, and mapping it back:
 
@@ -190,7 +192,7 @@ number you typed the **minimum** material anywhere along that wall. Two conseque
   boundary that eats into the wall, so the chord length is held under `√(8·r·sag)` and every wall
   carries the leftover sag as an allowance.
 
-The tests measure all of it on the finished millimetre geometry — every pair of cells in 31
+The tests measure all of it on the finished millimetre geometry — every pair of cells in 50
 configurations, checked for overlap, nesting, self-crossing loops, band containment, seam
 clearance, and the wall actually left between them.
 
@@ -233,6 +235,36 @@ brick-staggered ring to ring, all sharing one angular pitch so the columns line 
 | `wall` | `3` mm | Material between neighbouring cells — exactly this radially, and this at the tightest point of every ring wall. |
 | `waist` | `0.45` | Waist width ÷ cell width. Lower pinches harder (more auxetic); `0.9` is nearly a plain hex. |
 | `cornerRadius` | `1.2` mm | Fillets the corners, waist included — a rounded waist bows into the wall, so the bow is capped at the slack that corner has. |
+
+### Graded rings
+
+The regular airless-tire web: concentric rings of cells that grow with the radius — small around
+the hub, large at the rim — which is what most moulded airless tires and robot wheels actually
+look like. It is the deliberate opposite of the voronoi: nothing here is random.
+
+One angular pitch is shared by the whole web, so a cell is exactly as wide as its own radius makes
+it, and `grade` spaces the ring boundaries geometrically so the *height* grows with the width —
+each cell a scaled copy of the one inside it. Rings brick-stagger, so the radial walls of one ring
+sit over the middle of the cells in the next.
+
+Each ring then takes the whole number of cells nearest that shared pitch and stretches to fill its
+own run. It has to: the seam keep-out is a fixed number of millimetres, so it costs a ring near the
+hub several times as many degrees as one at the rim, and without the stretch every inner ring would
+leave most of a cell's width standing solid beside the joint.
+
+| Option | Default | What it does |
+|---|---|---|
+| `rings` | `0` (auto) | Cell rings across the band. Auto takes ~26 mm of band per ring, and more when grading asks for it — a band spanning a wide range of radii needs the extra rings to keep the step from one to the next under ~1.4×. Rings whose cells would come out unprintably shallow are dropped. |
+| `cells` | `0` (auto) | Cells around the whole wheel, at the shared pitch. Auto sizes them square at the middle ring. |
+| `wall` | `2.6` mm | Material between neighbouring cells — exactly this radially, and this at the tightest point of every ring wall. |
+| `cellShape` | `hex` | `hex` narrows the cell towards its two flat ends; `rect` keeps the sides straight all the way; `diamond` pulls the ends to a point, leaving a triangulated truss between them. |
+| `grade` | `1` | How the rings are spaced. `1` makes each ring's height proportional to its radius, so cells grow in both directions at once; `0` gives every ring the same height and cells widen only across. Anything between blends the two. |
+| `swirl` | `0`° | Leans every cell off radial by that many degrees, measured on the wheel — a turbine web. It is a shear of the chart, so the walls are untouched; each ring simply carries fewer cells, since the lean has to clear the seams too. |
+| `cornerRadius` | `1.2` mm | Fillets the cell corners. Every corner is convex, so this only ever hands material back. |
+
+Cells narrower than 3 mm are dropped rather than cut — on a wheel with a small hub and a big rim
+the innermost ring can grade its way down to noise, and a hole a nozzle can barely draw is not
+worth a boolean.
 
 ### Voronoi
 
@@ -454,8 +486,9 @@ took ~80 s, busier wheels came back `Batch edit result is not valid` or dropped 
 connection, and no boolean would touch an operand with a curved face — so a crown could never be
 cut, only lofted. Every full-depth cut had to be folded back into the profile as another sketch
 loop to keep the tool count down. OpenCascade has none of those limits, so all of that machinery
-went away and every cut is just a prism again. The matrix builds **22/22, 33 pieces, ~37 s of
-kernel time**; the 19 configurations it started as managed 14/19 and 85–146 s per piece before. The failure modes
+went away and every cut is just a prism again. On the 19 configurations the two backends were
+compared over, OpenCascade built **19/19, 28 pieces, 36.6 s of kernel time**, against 14/19 and
+85–146 s per piece before. The failure modes
 that shaped the old design are catalogued in
 [docs/zoo-api-notes.md](docs/zoo-api-notes.md), which is now a historical record.
 
@@ -499,7 +532,7 @@ src/lib/zip.js                dependency-free ZIP writer
 src/lib/env.js                dependency-free .env / .env.local loader
 public/                       UI (vanilla JS + vendored three.js, 2D canvas fallback)
 scripts/setup-occ.mjs         creates ./bin/occ-venv with OpenCascade installed
-scripts/validate-occ.js       builds a 22-config matrix through the real kernel
+scripts/validate-occ.js       builds a 24-config matrix through the real kernel
 test/                         node:test suite
 ```
 

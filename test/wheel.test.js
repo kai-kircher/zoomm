@@ -231,6 +231,67 @@ test('tpu flexweb produces slots', () => {
   assert.ok(plan.infillInfo.slotsTotal >= plan.N);
 });
 
+// A flex-web slot is a curved centreline offset ±hw along its own normal. That
+// normal leans off tangential — the centreline is an arc, not a radial line —
+// so the offset carries a radial component and the corners overshoot the
+// centreline's ends. Slots used to reach 2 mm past the web band, 1.6 mm of it
+// into the rim; the planner now solves for the centreline ends that put the
+// finished slot's extremes on the band. Sampling the emitted arcs and caps is
+// what proves it: the extremes of both are interior, not at the corners.
+const arcPoints = (seg, n = 240) => {
+  const a0 = Math.atan2(seg.a[1] - seg.center[1], seg.a[0] - seg.center[0]);
+  const a1 = Math.atan2(seg.b[1] - seg.center[1], seg.b[0] - seg.center[0]);
+  let sweep = a1 - a0;
+  if (seg.ccw) while (sweep <= 1e-12) sweep += 2 * Math.PI;
+  else while (sweep >= -1e-12) sweep -= 2 * Math.PI;
+  return Array.from({ length: n + 1 }, (_, i) => {
+    const a = a0 + (sweep * i) / n;
+    return [seg.center[0] + seg.radius * Math.cos(a), seg.center[1] + seg.radius * Math.sin(a)];
+  });
+};
+const pathPoints = (cutter) =>
+  cutter.segs.flatMap((s) =>
+    s.kind === 'arc'
+      ? arcPoints(s)
+      : Array.from({ length: 17 }, (_, i) => [
+          s.a[0] + ((s.b[0] - s.a[0]) * i) / 16,
+          s.a[1] + ((s.b[1] - s.a[1]) * i) / 16,
+        ])
+  );
+
+test('flex-web slots stay inside the web band, corners and all', () => {
+  let checked = 0;
+  for (const diameter of [100, 140, 180, 220, 240, 260, 300, 400, 520, 640, 800]) {
+    for (const width of [25, 40, 60]) {
+      for (const bore of [
+        { type: 'keyed', diameter: 20 },
+        { type: 'hex', hexAcrossFlats: 13 },
+        { type: 'bolt' },
+        { type: 'plain', diameter: 12 },
+      ]) {
+        const plan = planWheel({ diameter, width, material: 'tpu', infill: 'flexweb', tread: 'slick', bore });
+        if (plan.infillInfo.style !== 'flexweb') continue;
+        const label = `d${diameter} w${width} ${bore.type}`;
+        const { rHub, rRimIn, rWebIn, rWebOut } = plan.radii;
+        const slots = plan.uniquePieces[0].cutters.filter((c) => c.id.startsWith('web'));
+        assert.ok(slots.length > 0, `${label} claims flexweb but cut no slots`);
+        for (const slot of slots) {
+          const rs = pathPoints(slot).map(([x, y]) => Math.hypot(x, y));
+          const lo = Math.min(...rs);
+          const hi = Math.max(...rs);
+          // The band the web owns, and the material on either side of it.
+          assert.ok(hi <= rWebOut + 1e-6, `${label} ${slot.id} reaches r=${hi.toFixed(3)}, past rWebOut=${rWebOut}`);
+          assert.ok(lo >= rWebIn - 1e-6, `${label} ${slot.id} reaches r=${lo.toFixed(3)}, inside rWebIn=${rWebIn}`);
+          assert.ok(hi <= rRimIn, `${label} ${slot.id} cuts into the rim band (r=${hi.toFixed(3)} > ${rRimIn})`);
+          assert.ok(lo >= rHub, `${label} ${slot.id} cuts into the hub (r=${lo.toFixed(3)} < ${rHub})`);
+          checked++;
+        }
+      }
+    }
+  }
+  assert.ok(checked > 100, `only ${checked} slots checked`);
+});
+
 test('honeycomb cell count is bounded', () => {
   const plan = planWheel({ diameter: 500, width: 60, infill: 'honeycomb', printer: { x: 300, y: 300, z: 300, margin: 10 } });
   if (plan.infillInfo.style === 'honeycomb') {

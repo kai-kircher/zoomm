@@ -23,6 +23,7 @@ const WEB_STYLES = ['solid', 'spokes', 'honeycomb', 'flexweb', 'lattice', 'auxet
 // browser preview's triangulator) is comfortable.
 const WEB_CELL_CAP = 120;
 
+const TAU = Math.PI * 2;
 const d2r = (d) => (d * Math.PI) / 180;
 const r2d = (r) => (r * 180) / Math.PI;
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
@@ -1380,6 +1381,64 @@ export function planWheel(input = {}) {
     slotsTotal = Math.max(N, Math.round(slotsTotal / N) * N);
     const perSeg = slotsTotal / N;
     const sweep0 = clamp((0.85 * 360) / slotsTotal, 10, 35);
+    // rI0 and rO0 are the radii the finished *slot* spans, not where its
+    // centreline ends. The ±hw offset runs along the centreline arc's normal,
+    // and that normal is not tangential — the centreline is an arc, not a
+    // radial line — so each offset carries a radial component: an outer corner
+    // lands further out than the centreline's outer end, an inner corner
+    // further in than its inner end. Ending the centreline on rI0/rO0 pushed
+    // slots 2 mm past the web band, 1.6 mm of it into the rim. `slotAt` builds a
+    // slot from a trial pair of centreline end radii and reports where the
+    // corners actually fall, so the caller can solve for the pair that puts
+    // them on rI0/rO0. Everything the pattern is keyed to — the slot count,
+    // the sweep, hw — still comes off the nominal band, so only the ends move.
+    const slotAt = (aI, aO, aM, rIc, rOc, hw) => {
+      const I = polar(rIc, aI);
+      const O = polar(rOc, aO);
+      const cc = circumcircle(I, O, polar(rm, aM));
+      if (!cc) return null;
+      const off = (P, s) => [
+        cc.c[0] + ((P[0] - cc.c[0]) / cc.r) * (cc.r + s),
+        cc.c[1] + ((P[1] - cc.c[1]) / cc.r) * (cc.r + s),
+      ];
+      const Ip = off(I, hw);
+      const Im = off(I, -hw);
+      const Op = off(O, hw);
+      const Om = off(O, -hw);
+      const ccw = (I[0] - cc.c[0]) * (O[1] - cc.c[1]) - (I[1] - cc.c[1]) * (O[0] - cc.c[0]) > 0;
+      // Radial span of the finished loop. Corners alone do not give it: a cap
+      // is a chord, so its closest approach to the axis can fall mid-span, and
+      // a flank is an arc, so it reaches its own extremes where the line
+      // through cc.c and the axis crosses it. Both interiors are cheap and
+      // exact, and both bind — pinning only the corners left slots dipping a
+      // tenth of a millimetre past the radius they were meant to stop at.
+      let rIn = Infinity;
+      let rOut = -Infinity;
+      const hit = (x, y) => {
+        const r = Math.hypot(x, y);
+        if (r < rIn) rIn = r;
+        if (r > rOut) rOut = r;
+      };
+      for (const P of [Ip, Im, Op, Om]) hit(P[0], P[1]);
+      for (const [P, Q] of [[Im, Ip], [Op, Om]]) {
+        const dx = Q[0] - P[0];
+        const dy = Q[1] - P[1];
+        const t = -(P[0] * dx + P[1] * dy) / (dx * dx + dy * dy);
+        if (t > 0 && t < 1) hit(P[0] + dx * t, P[1] + dy * t);
+      }
+      const axis = Math.atan2(cc.c[1], cc.c[0]); // the axis, seen from cc.c
+      for (const [from, to, rad, dir] of [[Ip, Op, cc.r + hw, ccw], [Om, Im, cc.r - hw, !ccw]]) {
+        const a0 = Math.atan2(from[1] - cc.c[1], from[0] - cc.c[0]);
+        const a1 = Math.atan2(to[1] - cc.c[1], to[0] - cc.c[0]);
+        // Signed turn from a0, taken the way this arc runs.
+        const turn = (u) => (dir ? mod(u, TAU) : mod(u, TAU) - TAU);
+        const sweep = Math.abs(turn(a1 - a0));
+        for (const a of [axis, axis + Math.PI]) {
+          if (Math.abs(turn(a - a0)) < sweep) hit(cc.c[0] + rad * Math.cos(a), cc.c[1] + rad * Math.sin(a));
+        }
+      }
+      return { I, O, cc, Ip, Im, Op, Om, ccw, rIn, rOut };
+    };
     let placed = 0;
     for (let j = 0; j < perSeg; j++) {
       const mid = (j + 0.5) * (A / perSeg);
@@ -1389,30 +1448,40 @@ export function planWheel(input = {}) {
       for (let att = 0; att < 3 && !ok; att++) {
         const aI = mid - trySweep / 2;
         const aO = mid + trySweep / 2;
-        const I = polar(rI0, aI);
-        const O = polar(rO0, aO);
-        const M = polar(rm, mid + trySweep * 0.06);
-        const cc = circumcircle(I, O, M);
-        if (!cc) break;
+        const aM = mid + trySweep * 0.06;
+        // Pull the centreline ends in by what the offset costs radially. Each
+        // extreme tracks its own end near 1:1, so the residual collapses in a
+        // couple of passes; four leaves the slot a few microns inside the band.
+        let rIc = rI0;
+        let rOc = rO0;
+        let s = slotAt(aI, aO, aM, rIc, rOc, hw);
+        for (let pass = 0; pass < 4 && s; pass++) {
+          const dIn = rI0 - s.rIn;
+          const dOut = rO0 - s.rOut;
+          if (Math.abs(dIn) < 1e-9 && Math.abs(dOut) < 1e-9) break;
+          rIc += dIn;
+          rOc += dOut;
+          s = slotAt(aI, aO, aM, rIc, rOc, hw);
+        }
+        if (!s) break;
+        if (rOc - rIc < 2 * hw) {
+          // The correction ate the slot: no length left between the end caps.
+          trySweep *= 0.7;
+          if (att === 1) hw *= 0.7;
+          continue;
+        }
+        const { cc, I, O, Ip, Im, Op, Om, ccw: ccwDir } = s;
         // Slot angle grows monotonically with radius, so the angular extreme
         // at each face is the endpoint nearest it — check each at its own
         // radius with its own width padding.
-        const padI = r2d((hw + 1) / rI0);
-        const padO = r2d((hw + 1) / rO0);
-        if (N > 1 && (aI - padI < faceMarginAng(rI0) || aO + padO > A - faceMarginAng(rO0))) {
+        const padI = r2d((hw + 1) / rIc);
+        const padO = r2d((hw + 1) / rOc);
+        if (N > 1 && (aI - padI < faceMarginAng(rIc) || aO + padO > A - faceMarginAng(rOc))) {
           trySweep *= 0.7;
           if (att === 1) hw *= 0.7;
           continue;
         }
         ok = true;
-        const uI = [(I[0] - cc.c[0]) / cc.r, (I[1] - cc.c[1]) / cc.r];
-        const uO = [(O[0] - cc.c[0]) / cc.r, (O[1] - cc.c[1]) / cc.r];
-        const Ip = [cc.c[0] + uI[0] * (cc.r + hw), cc.c[1] + uI[1] * (cc.r + hw)];
-        const Im = [cc.c[0] + uI[0] * (cc.r - hw), cc.c[1] + uI[1] * (cc.r - hw)];
-        const Op = [cc.c[0] + uO[0] * (cc.r + hw), cc.c[1] + uO[1] * (cc.r + hw)];
-        const Om = [cc.c[0] + uO[0] * (cc.r - hw), cc.c[1] + uO[1] * (cc.r - hw)];
-        const cross = (I[0] - cc.c[0]) * (O[1] - cc.c[1]) - (I[1] - cc.c[1]) * (O[0] - cc.c[0]);
-        const ccwDir = cross > 0;
         // Interior probe: the centerline point midway along the slot.
         const midChord = [(I[0] + O[0]) / 2, (I[1] + O[1]) / 2];
         const mcLen = Math.hypot(midChord[0] - cc.c[0], midChord[1] - cc.c[1]) || 1;

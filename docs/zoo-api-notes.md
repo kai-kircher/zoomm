@@ -528,7 +528,7 @@ Credit where it's due; these are why the project is built on Zoo at all.
 **These commands no longer exist in this repository.** `npm run validate:kcl`,
 `npm run setup:zoo`, `src/lib/kclgen.js` and `src/lib/zoo.js` were removed when
 the backend moved to OpenCascade; the nearest equivalent today is `npm run
-validate`, which builds the same 19-configuration matrix locally and never
+validate`, which builds a superset of that matrix locally and never
 touches the network. To reproduce a finding below against the Zoo engine, check
 out the last commit before the migration:
 

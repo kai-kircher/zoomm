@@ -14,6 +14,8 @@ The whole vocabulary a generated `piece-*.py` speaks is small on purpose:
     cutter   {shape: circle|poly|path, z0, z1}       a prism to subtract
              {shape: revolve, segs}                  a tool of revolution, its
                                                      loop drawn in (r, z)
+    zone     {key, material, r0, r1, seam}           one body of a
+                                                     multi-material piece
 
 Every piece is then the same two steps — build a blank from the boundary,
 subtract the cutters:
@@ -21,6 +23,11 @@ subtract the cutters:
     blank = prism(section)            straight tread, one section
           | loft(sections)            slanted tread, several sections
     piece = blank - every cutter
+
+and, when the piece is printed in more than one filament, a third: intersect
+that solid with each zone's annulus to get one body per material. Neighbouring
+bodies share their boundary cylinder exactly, so a slicer loading them as the
+parts of one object finds no gap and no overlap between them.
 
 The tire's running surface is one of those cutters: the crown and every
 circumferential groove, as a single solid of revolution whose profile is an
@@ -36,7 +43,7 @@ than cut, and why it came out visibly faceted. OpenCascade has neither limit.
 import math
 
 from OCP.BRep import BRep_Tool
-from OCP.BRepAlgoAPI import BRepAlgoAPI_Cut
+from OCP.BRepAlgoAPI import BRepAlgoAPI_Common, BRepAlgoAPI_Cut
 from OCP.BRepBuilderAPI import (
     BRepBuilderAPI_MakeEdge,
     BRepBuilderAPI_Transform,
@@ -353,6 +360,98 @@ def _unify(shape):
     unify = ShapeUpgrade_UnifySameDomain(shape, True, True, False)
     unify.Build()
     return unify.Shape()
+
+
+
+# ------------------------------------------------------------- material zones
+
+def zone_tool(zone, width):
+    """The annulus that carves one material's body out of a finished piece.
+
+    A prism of the ring [r0, r1], run past both faces of the piece so that no
+    face of the tool is ever coplanar with a face of the body. r0 = 0 makes it
+    a plain disc — the innermost zone has no inner wall of its own; the bore is
+    already cut, and asking a tool to re-cut a surface the body is bounded by
+    is the one thing a boolean reliably gets wrong.
+
+    `seam` moves the circle's seam edge off the piece's radial faces. A prism
+    of a full circle carries the same kind of seam edge a revolution does, and
+    a revolution's seam lying in the plane of a planar face of the body makes
+    the boolean silently do nothing (see `revolve_cutter`). No prismatic tool
+    here has been caught doing that — parking one on a sector's own face still
+    split correctly when it was tried — so this is a precaution, and cheap.
+    What actually proves each build is the volume check in `split_zones`.
+    """
+    z0, z1 = -1.0, float(width) + 1.0
+    holes = []
+    r0 = float(zone.get("r0", 0.0))
+    if r0 > 1e-9:
+        holes.append(wire_circle((0, 0), r0, z0, ccw=False))
+    face = face_of(wire_circle((0, 0), float(zone["r1"]), z0), holes, z0)
+    seam = float(zone.get("seam", 0.0))
+    if seam:
+        turn = gp_Trsf()
+        turn.SetRotation(gp_Ax1(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1)), math.radians(seam))
+        face = BRepBuilderAPI_Transform(face, turn, True).Shape()
+    return BRepPrimAPI_MakePrism(face, gp_Vec(0, 0, z1 - z0)).Shape()
+
+
+def split_zones(shape, zones, width):
+    """One (zone, solid) per material, from one finished piece.
+
+    The zones tile the piece: they are consecutive rings that start at the axis
+    and end past the tread, and neighbours share their boundary cylinder
+    exactly. So the bodies must add back up to what they came from, and this
+    checks that they do — because the ways this operation fails are quiet ones.
+    A tool whose seam lies in the plane of one of the piece's radial faces can
+    leave the intersection returning the *whole* body; a tool that misses can
+    return nothing. Both hand back a valid, watertight, wheel-shaped solid, and
+    both show up immediately in the sum.
+    """
+    total = volume(shape)
+    bodies, accounted = [], 0.0
+    for zone in zones:
+        op = BRepAlgoAPI_Common()
+        args, tools = TopTools_ListOfShape(), TopTools_ListOfShape()
+        args.Append(shape)
+        tools.Append(zone_tool(zone, width))
+        op.SetArguments(args)
+        op.SetTools(tools)
+        op.SetRunParallel(True)
+        op.SetFuzzyValue(BOOLEAN_FUZZ)
+        op.Build()
+        if not op.IsDone():
+            raise RuntimeError(f"zone {zone['key']!r}: intersection failed")
+        body = _unify(op.Shape())
+        vol = volume(body)
+        if vol <= 0:
+            raise RuntimeError(
+                f"zone {zone['key']!r} ({zone['r0']}-{zone['r1']} mm) came out empty"
+            )
+        accounted += vol
+        bodies.append((zone, body))
+
+    slack = max(1.0, 1e-4 * total)
+    if abs(accounted - total) > slack:
+        raise RuntimeError(
+            f"material zones do not add up to the piece: {accounted:.1f} mm^3 across "
+            f"{len(bodies)} bodies against {total:.1f} mm^3 whole "
+            f"({accounted - total:+.1f}). The split is wrong, not merely imprecise."
+        )
+    return bodies
+
+
+def zone_stem(stem, zone):
+    """File stem for one body: which piece, which zone, which spool."""
+    return f"{stem}-{zone['key']}-{zone['material']}"
+
+
+def save_zones(shape, zones, width, stem, formats=("stl", "step"), out_dir="."):
+    """Split a piece into its material bodies and write every one."""
+    written = []
+    for zone, body in split_zones(shape, zones, width):
+        written += save(body, zone_stem(stem, zone), formats, out_dir)
+    return written
 
 
 # ------------------------------------------------------------------- reporting

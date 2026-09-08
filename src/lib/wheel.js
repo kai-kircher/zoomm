@@ -34,11 +34,29 @@ const rnd = (v, p = 3) => {
   return Object.is(x, -0) ? 0 : x;
 };
 
+// Filaments the planner knows how to advise on.
+export const MATERIALS = ['pla', 'petg', 'abs', 'tpu'];
+
+// The wheel's radial bands, innermost first. A material change can only be
+// asked for at a boundary between two of them, because those boundaries are
+// the only cylinders that are solid all the way round whatever the web is
+// doing: every web pattern is laid out inside [rHub + 0.5, rRimIn - 0.5], and
+// no dovetail reaches either line either. See `zones` in planWheel.
+export const ZONE_KEYS = ['hub', 'web', 'tread'];
+
 export const DEFAULTS = Object.freeze({
   units: 'mm', // interpretation of the numeric length fields below
   diameter: 355.6, // 14in airless-cart-wheel demo default
   width: 50,
-  material: 'petg', // pla | petg | abs | tpu
+  material: 'petg', // pla | petg | abs | tpu — the whole wheel, unless:
+  materials: {
+    // Multi-material printing: which filament each radial band is made of.
+    // Empty follows `material`, so a single-material wheel is the default and
+    // is emitted exactly as it always was — one body per piece.
+    tread: '', // the tread and the rim ring under it
+    web: '', // the spokes / airless web
+    hub: '', // the hub ring around the bore
+  },
   infill: 'spokes', // solid | spokes | honeycomb | flexweb | lattice | auxetic | voronoi
   spokeCount: 0, // 0 = auto
   tread: 'lugged', // slick | ribbed | lugged | diamond | chevron | angled
@@ -147,6 +165,7 @@ export function normalizeParams(input = {}) {
     lattice: { ...structuredClone(DEFAULTS.lattice), ...structuredClone(input.lattice || {}) },
     auxetic: { ...structuredClone(DEFAULTS.auxetic), ...structuredClone(input.auxetic || {}) },
     voronoi: { ...structuredClone(DEFAULTS.voronoi), ...structuredClone(input.voronoi || {}) },
+    materials: { ...structuredClone(DEFAULTS.materials), ...structuredClone(input.materials || {}) },
     profile: { ...structuredClone(DEFAULTS.profile), ...structuredClone(input.profile || {}) },
     printer: { ...structuredClone(DEFAULTS.printer), ...structuredClone(input.printer || {}) },
     joint: { ...structuredClone(DEFAULTS.joint), ...structuredClone(input.joint || {}) },
@@ -188,7 +207,13 @@ export function normalizeParams(input = {}) {
   p.printer.z = clamp(p.printer.z, 20, 2000);
   p.printer.margin = clamp(p.printer.margin, 0, 60);
 
-  if (!['pla', 'petg', 'abs', 'tpu'].includes(p.material)) p.material = 'petg';
+  if (!MATERIALS.includes(p.material)) p.material = 'petg';
+  // A zone naming a filament we do not know follows the wheel's, which is also
+  // what an absent zone does — so a typo degrades to a single-material wheel
+  // rather than to one made of something the print guidance cannot describe.
+  for (const k of ZONE_KEYS) {
+    if (!MATERIALS.includes(p.materials[k])) p.materials[k] = '';
+  }
   if (!WEB_STYLES.includes(p.infill)) p.infill = 'spokes';
   if (!['slick', 'ribbed', 'lugged', 'diamond', 'chevron', 'angled'].includes(p.tread)) p.tread = 'lugged';
   if (!['flat', 'crowned', 'round'].includes(p.profile.shape)) p.profile.shape = 'flat';
@@ -530,6 +555,76 @@ function mulberry32(seed) {
     t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
+}
+
+// ---------------------------------------------------------------------------
+// Materials
+// ---------------------------------------------------------------------------
+
+// Adhesive for a seam between two pieces of the same material — the joint the
+// dovetails make. A multi-material wheel has one of these per zone the seams
+// pass through, because each zone's segments only ever meet their own kind.
+const GLUES = {
+  tpu: {
+    name: 'Flexible contact adhesive (E6000 / Shoe Goo class)',
+    why: 'TPU flexes — rigid glue lines crack. A flexible adhesive moves with the joint.',
+    tips: 'Scuff mating faces, clean with IPA, thin bead in each dovetail pocket and on both faces, slide together, wipe squeeze-out, cure 24 h.',
+  },
+  pla: {
+    name: 'Flexible polyurethane construction adhesive (e.g., Loctite PL Premium class)',
+    why: 'A wheel sees shock and vibration; slightly flexible PU survives impacts that brittle CA lines will not. Use 2-part epoxy instead if you want maximum stiffness.',
+    tips: 'Thin bead in each dovetail pocket and along both faces, slide together, clamp lightly, wipe squeeze-out, cure 24 h.',
+  },
+  petg: {
+    name: 'Flexible polyurethane construction adhesive (e.g., Loctite PL Premium class)',
+    why: 'PETG bonds poorly with CA; PU grips it well and tolerates flex and vibration.',
+    tips: 'Scuff faces with 120-grit, clean with IPA, thin bead in pockets and faces, slide, wipe, cure 24 h.',
+  },
+  abs: {
+    name: 'Acetone solvent weld (or flexible PU where impact matters)',
+    why: 'Acetone welds ABS into a near-monolithic part — strongest option. PU stays flexible if the wheel takes hard impacts.',
+    tips: 'Brush acetone on both faces, slide together immediately, hold 60 s, full strength in 24 h.',
+  },
+};
+
+// How well two filaments weld to each other where two zones meet, printed
+// together on one machine. This matters more here than it does on most
+// multi-material parts: everything the tread does to the ground it does
+// *through* that cylinder, so a weak interface is a tread that peels.
+//
+// Keys are the pair sorted alphabetically.
+const BONDS = {
+  'petg|tpu': {
+    level: 'good',
+    why: 'This is the pairing to reach for when you want a soft tread on a rigid core.',
+  },
+  'pla|tpu': {
+    level: 'weak',
+    why: 'TPU grips PLA far more weakly than it grips PETG. Print the rigid zones in PETG instead, or expect the soft one to peel away under load.',
+  },
+  'petg|pla': {
+    level: 'weak',
+    why: 'PETG is what people put under PLA supports so the support comes away cleanly — which is exactly the property you do not want here. Use one of the two for both zones.',
+  },
+  'abs|pla': {
+    level: 'weak',
+    why: 'Neither sticks to the other, and they do not want the same chamber: ABS needs the heat that makes PLA sag.',
+  },
+  'abs|petg': {
+    level: 'weak',
+    why: 'Neither sticks to the other, and ABS wants a hot enclosure that PETG does not.',
+  },
+  'abs|tpu': {
+    level: 'weak',
+    why: 'TPU does not weld to ABS, and the two want different chamber temperatures.',
+  },
+};
+
+export function bondBetween(inner, outer) {
+  if (inner === outer) {
+    return { level: 'weld', why: 'One filament both sides: the interface is an ordinary layer bond, as strong as the part around it.' };
+  }
+  return BONDS[[inner, outer].sort().join('|')];
 }
 
 // ---------------------------------------------------------------------------
@@ -1013,6 +1108,24 @@ export function planWheel(input = {}) {
     const u = (2 * z) / W - 1;
     return p.tread === 'chevron' ? barShift * (0.5 - Math.abs(u)) : barShift * u;
   };
+
+  // Where a full-turn tool's seam is parked, in degrees.
+  //
+  // Any tool built from a complete circle — the revolved tire below, and the
+  // cylinders that separate the material zones — carries a seam edge, and
+  // OpenCascade's boolean silently does *nothing* when that seam lies in the
+  // same plane as a planar face of the body. No error, no warning, the blank
+  // simply comes back untouched. Measured on a Ø355.6 crowned sector:
+  // 825 058.7 mm³ before the cut and 825 058.7 after, and 807 048.9 with the
+  // seam moved anywhere else at all.
+  //
+  // So it is parked where this piece has no radial face. A segmented wheel has
+  // two, at 0° and A°, and the roomiest spot is the far side of the wheel from
+  // them. A one-piece wheel has none except the walls of its tread windows, so
+  // the seam goes down the middle of a bar. (A *slanted* wall sweeps as it
+  // crosses the width and so can only ever touch the seam along a line, which
+  // is harmless — it is the coplanar case that bites.)
+  const toolSeam = rnd(mod(N > 1 ? (A + 360) / 2 : barCount ? barPhase(0) : 0, 360), 4);
 
   // -------------------------------------------------------------------------
   // Sections (canonical piece frame: sector spans [0°, A°])
@@ -1889,28 +2002,13 @@ export function planWheel(input = {}) {
     }
     const first = segs[0].a;
     const last = prev;
-    // Where the full revolution's seam falls, in degrees.
-    //
-    // A revolved solid's seam is a real edge of it, and OpenCascade's boolean
-    // silently does *nothing* when that seam lies in the same plane as a
-    // planar face of the body — no error, no warning, the blank simply comes
-    // back untouched. Measured on a Ø355.6 crowned sector: 825 058.7 mm³
-    // before the cut and 825 058.7 after, and 807 048.9 with the seam moved
-    // anywhere else at all.
-    //
-    // So it is parked where this piece has no radial face. A segmented wheel
-    // has two, at 0° and A°, and the roomiest spot is the far side of the
-    // wheel from them. A one-piece wheel has none except the walls of its
-    // tread windows, so the seam goes down the middle of a bar. (A *slanted*
-    // wall sweeps as it crosses the width and so can only ever touch the seam
-    // along a line, which is harmless — it is the coplanar case that bites.)
-    const seam = mod(N > 1 ? (A + 360) / 2 : barCount ? barPhase(0) : 0, 360);
     // Close the loop out past the rim and beyond both faces, so no face of the
-    // tool is ever coplanar with a face of the piece.
+    // tool is ever coplanar with a face of the piece. `toolSeam` (above) keeps
+    // the revolution's own seam edge out of the plane of any face it has.
     shared.push({
       id: 'tire',
       shape: 'revolve',
-      seam: rnd(seam, 4),
+      seam: toolSeam,
       segs: [
         { kind: 'line', a: rz(first[0], zLo), b: first },
         ...segs,
@@ -2050,41 +2148,163 @@ export function planWheel(input = {}) {
   const pieceFits = N === 1 ? wholeFits && W <= uz : fitsXY(bbox) && W <= uz;
 
   // -------------------------------------------------------------------------
+  // Material zones
+  // -------------------------------------------------------------------------
+  // A multi-material wheel is the same solid, cut into one body per filament
+  // by cylinders concentric with the axle. The two candidate cylinders are
+  // rHub and rRimIn — the walls of the web band — and they are the right ones
+  // for three reasons: they are solid all the way round whatever the web is
+  // (every pattern is laid out inside [rHub + 0.5, rRimIn - 0.5]), no dovetail
+  // reaches either of them, and they separate the three things a wheel is made
+  // of. rRimIn in particular keeps the whole rim ring with the tread, so a
+  // soft tread gets a sidewall and its own dovetails rather than a 3 mm skin —
+  // and the alternative line, the bar-window floor at R - treadEff, is a
+  // surface the piece profile already lies on, which is the one place a
+  // boolean must never be asked to cut.
+  //
+  // Neighbouring bodies share that cylinder exactly: no gap, no overlap, which
+  // is what a slicer wants from the parts of one multi-material object. The
+  // split itself happens in the kernel (`split_zones` in wheelwright_occ.py);
+  // all that is decided here is where the lines fall and what is on each side.
+  //
+  // Kept monotonic by construction rather than by assuming the bands come out
+  // in order: a wheel small enough that its hub ring runs into its rim band
+  // simply has no web band, and the two lines land on top of each other.
+  const zoneRim = clamp(rRimIn, 0, R);
+  const zoneEdge = clamp(rHub, 0, zoneRim);
+  const zoneBand = {
+    hub: [0, rnd(zoneEdge)],
+    web: [rnd(zoneEdge), rnd(zoneRim)],
+    // Past the running surface, so the outermost body is bounded by the wheel
+    // itself rather than by its own tool. Same clearance the tire tool takes.
+    tread: [rnd(zoneRim), rnd(R + 2)],
+  };
+  const zoneMat = Object.fromEntries(ZONE_KEYS.map((k) => [k, p.materials[k] || p.material]));
+
+  // A band too thin to print as its own body takes its inner neighbour's
+  // filament instead of becoming a two-perimeter sliver of a second one.
+  const MIN_ZONE_BAND = 3;
+  for (let i = 1; i < ZONE_KEYS.length; i++) {
+    const k = ZONE_KEYS[i];
+    const inner = ZONE_KEYS[i - 1];
+    const [r0, r1] = zoneBand[k];
+    if (r1 - r0 >= MIN_ZONE_BAND || zoneMat[k] === zoneMat[inner]) continue;
+    warnings.push(
+      (r1 - r0 < 1e-6
+        ? `This wheel has no ${k} band — the ${inner} ring runs straight into what is outside it — `
+        : `The ${k} band is ${rnd(r1 - r0, 1)} mm wide, too thin to print as its own material, `) +
+        `so it is ${zoneMat[inner].toUpperCase()} with the ${inner} rather than the ${zoneMat[k].toUpperCase()} you asked for.`
+    );
+    zoneMat[k] = zoneMat[inner];
+  }
+
+  // Bands are merged where neighbours share a filament, so "TPU tread, TPU
+  // web, PETG hub" is two bodies and not three — one file per thing you
+  // actually print, whatever combination of zones it spans.
+  const zones = [];
+  for (const key of ZONE_KEYS) {
+    const [r0, r1] = zoneBand[key];
+    if (r1 - r0 < 1e-6) continue; // no such band on this wheel
+    const last = zones[zones.length - 1];
+    if (last && last.material === zoneMat[key]) {
+      last.keys.push(key);
+      last.key = last.keys.join('-');
+      last.r1 = r1;
+      continue;
+    }
+    zones.push({ key, keys: [key], material: zoneMat[key], r0, r1, seam: toolSeam });
+  }
+  const multiMaterial = zones.length > 1;
+  const materialSet = [...new Set(zones.map((z) => z.material))];
+
+  // Every interface, and how well the two sides of it weld.
+  const interfaces = [];
+  for (let i = 1; i < zones.length; i++) {
+    const bond = bondBetween(zones[i - 1].material, zones[i].material);
+    interfaces.push({
+      r: zones[i].r0,
+      inner: zones[i - 1].material,
+      outer: zones[i].material,
+      ...bond,
+    });
+    if (bond.level === 'weak') {
+      warnings.push(
+        `${zones[i - 1].material.toUpperCase()} and ${zones[i].material.toUpperCase()} meet at ` +
+          `Ø${rnd(zones[i].r0 * 2, 1)} mm, and that interface is the wheel's weakest point: it carries ` +
+          `everything the tread does to the ground. ${bond.why}`
+      );
+    }
+  }
+
+  // A boundary is meant to be a complete annulus of solid material, and it is
+  // — every web pattern is laid out inside the band walls, no dovetail reaches
+  // them, and the tire tool stops at the rim ring. The one exception the
+  // planner cannot design away is a bolt circle asked for wider than the wheel
+  // has room for: on a wheel whose hub ring has already swallowed the web band
+  // the innermost boundary falls at the rim ring, and a wide bolt pattern
+  // reaches past it. The bodies still tile the piece exactly; what changes is
+  // that they meet on a ring with holes in it, and that the bolts clamp
+  // through two filaments. Both are worth knowing before the print, not after.
+  const hubFeatureR = Math.max(boreMaxR, b.type === 'bolt' ? boltR + boltHoleR : 0);
+  for (const z of zones.slice(1)) {
+    if (hubFeatureR <= z.r0 + 1e-9) continue;
+    warnings.push(
+      `The hub features reach Ø${rnd(hubFeatureR * 2, 1)} mm, past the ${z.key} material boundary at ` +
+        `Ø${rnd(z.r0 * 2, 1)} mm — the bolts pass through both filaments, and the two bodies ` +
+        `meet on a ring with holes in it rather than a solid one. Shrink the bolt circle, or give both zones ` +
+        `the same material.`
+    );
+  }
+
+  // Which filament each dovetail is cut in — a seam only ever joins a piece to
+  // its own kind, so a joint is made of whichever zone it sits in.
+  for (const j of joints) {
+    j.material = (zones.find((z) => j.r >= z.r0 && j.r < z.r1) || zones[0]).material;
+  }
+
+  // -------------------------------------------------------------------------
   // Recommendations
   // -------------------------------------------------------------------------
-  const glue = {
-    tpu: {
-      name: 'Flexible contact adhesive (E6000 / Shoe Goo class)',
-      why: 'TPU flexes — rigid glue lines crack. A flexible adhesive moves with the joint.',
-      tips: 'Scuff mating faces, clean with IPA, thin bead in each dovetail pocket and on both faces, slide together, wipe squeeze-out, cure 24 h.',
-    },
-    pla: {
-      name: 'Flexible polyurethane construction adhesive (e.g., Loctite PL Premium class)',
-      why: 'A wheel sees shock and vibration; slightly flexible PU survives impacts that brittle CA lines will not. Use 2-part epoxy instead if you want maximum stiffness.',
-      tips: 'Thin bead in each dovetail pocket and along both faces, slide together, clamp lightly, wipe squeeze-out, cure 24 h.',
-    },
-    petg: {
-      name: 'Flexible polyurethane construction adhesive (e.g., Loctite PL Premium class)',
-      why: 'PETG bonds poorly with CA; PU grips it well and tolerates flex and vibration.',
-      tips: 'Scuff faces with 120-grit, clean with IPA, thin bead in pockets and faces, slide, wipe, cure 24 h.',
-    },
-    abs: {
-      name: 'Acetone solvent weld (or flexible PU where impact matters)',
-      why: 'Acetone welds ABS into a near-monolithic part — strongest option. PU stays flexible if the wheel takes hard impacts.',
-      tips: 'Brush acetone on both faces, slide together immediately, hold 60 s, full strength in 24 h.',
-    },
-  }[p.material];
+  // The filament the wheel is "mostly" made of, for the advice that can only
+  // be given once. `material` is the wheel's own setting and the fallback for
+  // every zone that does not override it, so it is that unless all three zones
+  // were overridden away from it.
+  const baseMaterial = materialSet.includes(p.material) ? p.material : zones[0].material;
 
-  const printRec = {
-    orientation: 'Pieces are generated lying flat — print them exactly as exported.',
-    walls: p.material === 'tpu' ? 3 : 4,
-    infillPct: p.material === 'tpu' ? 18 : 30,
+  // Adhesive is for the seams, so it is chosen from what the seams are made
+  // of — not from what the wheel mostly is. A one-piece wheel has no seams and
+  // falls back to the wheel's own material so the panel still says something.
+  const seamMaterials = joints.length ? [...new Set(joints.map((j) => j.material))] : [baseMaterial];
+  const glue = {
+    ...GLUES[seamMaterials.includes('tpu') ? 'tpu' : seamMaterials.length === 1 ? seamMaterials[0] : 'petg'],
+  };
+  if (seamMaterials.length > 1) {
+    glue.why +=
+      ` This wheel's seams are not all the same material (${seamMaterials.map((m) => m.toUpperCase()).join(' + ')}); ` +
+      `that is the adhesive to use if you want one tube for the whole wheel, but each joint has its own below.`;
+    glue.perJoint = joints.map((j) => ({
+      tag: j.tag,
+      material: j.material,
+      name: GLUES[j.material].name,
+      tips: GLUES[j.material].tips,
+    }));
+  }
+
+  const printFor = (m) => ({
+    material: m,
+    walls: m === 'tpu' ? 3 : 4,
+    infillPct: m === 'tpu' ? 18 : 30,
     infillPattern: 'gyroid',
     note:
-      p.material === 'tpu'
+      m === 'tpu'
         ? `TPU 95A, slow (~25 mm/s), no part cooling for first layers. The modeled ${['flexweb', 'lattice', 'auxetic'].includes(infillInfo.style) ? `${infillInfo.style} web does the springing` : 'web carries the load'} — slicer infill just fills walls.`
         : 'The structural pattern is modeled in the part; slicer infill only fills the solid ribs.',
+  });
+  const printRec = {
+    orientation: 'Pieces are generated lying flat — print them exactly as exported.',
+    ...printFor(baseMaterial),
   };
+  if (materialSet.length > 1) printRec.byMaterial = materialSet.map(printFor);
 
   return {
     params: p,
@@ -2103,6 +2323,13 @@ export function planWheel(input = {}) {
     N,
     segAngle: rnd(A, 4),
     solidDisk,
+    // One entry per body a piece is printed as, innermost first. A
+    // single-material wheel has exactly one, and nothing downstream splits it.
+    zones,
+    multiMaterial,
+    materials: zoneMat,
+    materialSet,
+    interfaces,
     joints,
     jointClearance: jc,
     profile: {

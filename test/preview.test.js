@@ -10,7 +10,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import * as THREE from 'three';
 import { planWheel, tireSurfaceAt, tireLevels } from '../src/lib/wheel.js';
-import { tracePieceProfile, classifyCutters, shapeEmitter, buildPieceShape, buildLoftGeometry } from '../public/preview.js';
+import { tracePieceProfile, classifyCutters, shapeEmitter, buildPieceShape, buildLoftGeometry, groupByZone } from '../public/preview.js';
 
 // Records the traced profile as a point list (arcs sampled).
 function samplingEmitter() {
@@ -395,4 +395,117 @@ test('every shaped piece encloses the solid its extrusion does — voids stay vo
       }
     }
   }
+});
+
+// ---------------------------------------------------------------------------
+// Material zones
+// ---------------------------------------------------------------------------
+// A multi-material piece is one solid cut into bodies at cylinders concentric
+// with the axle, and the preview has to show *those* bodies. Assigning whole
+// triangles by centroid would be cheaper and would put the colour boundary
+// tens of millimetres out, because a cap triangle out of the ear-clipper can
+// run from the bore to the rim — so straddling triangles are cut on the
+// cylinder instead. These tests pin both halves of that: the cut lands on the
+// real radius, and cutting does not lose, duplicate or unstitch anything.
+const ZONE_CASES = [
+  ['3 materials, segmented, extruded', { materials: { tread: 'tpu', web: 'petg', hub: 'abs' } }],
+  ['2 materials, honeycomb, crowned loft', { diameter: 200, width: 40, infill: 'honeycomb', tread: 'lugged', profile: { shape: 'crowned', crownDrop: 4 }, materials: { tread: 'tpu' } }],
+  ['2 materials, one piece, voronoi', { diameter: 180, width: 40, infill: 'voronoi', tread: 'slick', bore: { type: 'bolt' }, materials: { hub: 'petg', web: 'tpu', tread: 'tpu' } }],
+  ['2 materials, chevron loft', { diameter: 300, width: 50, infill: 'solid', tread: 'chevron', treadAngle: 30, materials: { tread: 'tpu' } }],
+];
+
+// The mesh the preview would build before it is grouped.
+function baseGeometry(plan, u) {
+  const shaped = plan.sections.length > 1 || classifyCutters(u.cutters).tire;
+  return (
+    (shaped ? buildLoftGeometry(THREE, plan, u) : null) ||
+    new THREE.ExtrudeGeometry(buildPieceShape(THREE, plan, u), {
+      depth: plan.W,
+      bevelEnabled: false,
+      curveSegments: 48,
+    })
+  );
+}
+
+test('zone groups put every triangle inside the band its material owns', () => {
+  for (const [name, cfg] of ZONE_CASES) {
+    const plan = planWheel(cfg);
+    const bounds = plan.zones.slice(1).map((z) => z.r0);
+    assert.ok(bounds.length >= 1, `${name}: more than one zone`);
+    for (const u of plan.uniquePieces) {
+      const geo = groupByZone(THREE, baseGeometry(plan, u), bounds);
+      const pos = geo.getAttribute('position');
+      const idx = geo.getIndex();
+      assert.equal(geo.groups.length, plan.zones.length, `${name}: one draw group per zone`);
+      const edges = [0, ...bounds, Infinity];
+      let covered = 0;
+      for (const g of geo.groups) {
+        const lo = edges[g.materialIndex];
+        const hi = edges[g.materialIndex + 1];
+        covered += g.count;
+        assert.ok(g.count > 0, `${name}: zone ${g.materialIndex} has geometry`);
+        for (let i = g.start; i < g.start + g.count; i++) {
+          const v = idx.getX(i);
+          const r = Math.hypot(pos.getX(v), pos.getY(v));
+          // Positions are stored as float32, so the cut lands on the cylinder
+          // to about 1e-5 mm at rim radii — a hundredth of the planner's grid.
+          assert.ok(
+            r > lo - 1e-4 && r < hi + 1e-4,
+            `${name}: vertex at r=${r.toFixed(4)} is outside its zone [${lo}, ${hi}]`
+          );
+        }
+      }
+      assert.equal(covered, idx.count, `${name}: the groups cover every triangle exactly once`);
+    }
+  }
+});
+
+test('splitting a piece into zones neither adds nor removes material', () => {
+  for (const [name, cfg] of ZONE_CASES) {
+    const plan = planWheel(cfg);
+    const bounds = plan.zones.slice(1).map((z) => z.r0);
+    for (const u of plan.uniquePieces) {
+      const base = baseGeometry(plan, u);
+      const want = signedVolume(base);
+      const got = signedVolume(groupByZone(THREE, base, bounds));
+      assert.ok(Math.abs(want) > 1, `${name}: the piece encloses something`);
+      assert.ok(
+        Math.abs(got - want) / Math.abs(want) < 1e-6,
+        `${name}: grouped mesh encloses ${got.toFixed(1)} mm³ against ${want.toFixed(1)} mm³`
+      );
+    }
+  }
+});
+
+test('a watertight piece is still watertight once it is split into zones', () => {
+  // Only the lofted path is indexed and shares vertices between triangles, so
+  // it is the only one where "every edge belongs to two faces" means anything
+  // — and the only one where a cut vertex could fail to be shared.
+  for (const [name, cfg] of ZONE_CASES) {
+    const plan = planWheel(cfg);
+    const bounds = plan.zones.slice(1).map((z) => z.r0);
+    for (const u of plan.uniquePieces) {
+      const base = buildLoftGeometry(THREE, plan, u);
+      if (!base) continue;
+      const idx = groupByZone(THREE, base, bounds).getIndex().array;
+      const edges = new Map();
+      for (let i = 0; i < idx.length; i += 3) {
+        const t = [idx[i], idx[i + 1], idx[i + 2]];
+        for (let k = 0; k < 3; k++) {
+          const [a, b] = [t[k], t[(k + 1) % 3]];
+          const key = a < b ? `${a}_${b}` : `${b}_${a}`;
+          edges.set(key, (edges.get(key) || 0) + 1);
+        }
+      }
+      const open = [...edges.values()].filter((v) => v !== 2).length;
+      assert.equal(open, 0, `${name}: ${open} edges are not shared by exactly two faces`);
+    }
+  }
+});
+
+test('a single-material wheel is handed back the mesh it came in with', () => {
+  const plan = planWheel({ diameter: 200, width: 40, infill: 'honeycomb' });
+  assert.equal(plan.multiMaterial, false);
+  const base = baseGeometry(plan, plan.uniquePieces[0]);
+  assert.equal(groupByZone(THREE, base, plan.zones.slice(1).map((z) => z.r0)), base);
 });

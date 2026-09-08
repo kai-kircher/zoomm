@@ -42,6 +42,14 @@ const CONFIGS = [
   // the ring across the 0°/360° seam.
   ['chevron-segmented', { diameter: 300, width: 50, infill: 'solid', tread: 'chevron', treadAngle: 30 }],
   ['angled-one-piece', { diameter: 120, width: 30, infill: 'spokes', tread: 'angled', treadAngle: 30, bore: { type: 'plain', diameter: 8 } }],
+  // The only spokes entry above is one-piece, where the gap between two ribs
+  // runs from seam to seam. Segmented, that gap is a quad the kernel meets
+  // nowhere else in this matrix — two lines offset from neighbouring rays,
+  // closed by arcs of two different radii — and it is bounded by the joint
+  // keep-out on one side and by a rib on the other. On a narrow wedge those
+  // two lines used to cross before reaching the inner web circle, and the
+  // bowtie that left was cut as a valid gap.
+  ['spokes-segmented', { diameter: 250, infill: 'spokes' }],
   ['ribbed-segmented', { infill: 'solid', tread: 'ribbed' }],
   // Curved cross-sections: several sections lofted rather than one extruded.
   ['crowned-lugged', { diameter: 200, width: 40, infill: 'solid', tread: 'lugged', profile: { shape: 'crowned', crownDrop: 5 } }],

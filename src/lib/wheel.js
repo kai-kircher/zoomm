@@ -1315,6 +1315,17 @@ export function planWheel(input = {}) {
       const oL = N > 1 && j === 0 ? cWeb : spokeT / 2;
       const oR = N > 1 && j === m - 1 ? cWeb : spokeT / 2;
       if (oL >= rWebIn - 1 || oR >= rWebIn - 1) break;
+      // Signed angular width of the gap. A boundary offset by o from its rib's
+      // centreline ray meets radius r at asin(o / r) past that ray, so the gap
+      // is pitchA - asin(oL/r) - asin(oR/r) wide there: narrowest at rWebIn and
+      // widening from there out, so wide enough at the inner circle means wide
+      // enough across the whole band. Negative means the two boundaries have
+      // already crossed by the time they reach it, and the quad below would be
+      // a bowtie. Measured from the offsets rather than from atan2 of the
+      // corners so that it stays signed — mod() of a negative span reads as
+      // ~359 degrees, which passed this guard and kept the folded gap.
+      const gapAngIn = pitchA - r2d(Math.asin(oL / rWebIn)) - r2d(Math.asin(oR / rWebIn));
+      if (gapAngIn < 3) continue;
       const sInL = Math.sqrt(rWebIn ** 2 - oL ** 2);
       const sOutL = Math.sqrt(rWebOut ** 2 - oL ** 2);
       const sInR = Math.sqrt(rWebIn ** 2 - oR ** 2);
@@ -1327,9 +1338,10 @@ export function planWheel(input = {}) {
       const pB = [sOutL * uL[0] + oL * tL[0], sOutL * uL[1] + oL * tL[1]];
       const pC = [sOutR * uR[0] - oR * tR[0], sOutR * uR[1] - oR * tR[1]];
       const pD = [sInR * uR[0] - oR * tR[0], sInR * uR[1] - oR * tR[1]];
-      const angA = r2d(Math.atan2(pA[1], pA[0]));
-      const angD = r2d(Math.atan2(pD[1], pD[0]));
-      if (mod(angD - angA, 360) < 3) continue;
+      // Seed point: halfway between the two boundaries at mid-band, so it lands
+      // inside the gap however the two offsets differ.
+      const rMid = (rWebIn + rWebOut) / 2;
+      const angMid = thL + (pitchA + r2d(Math.asin(oL / rMid)) - r2d(Math.asin(oR / rMid))) / 2;
       shared.push({
         id: `spoke${j + 1}`,
         shape: 'path',
@@ -1339,7 +1351,7 @@ export function planWheel(input = {}) {
           { kind: 'line', a: pC, b: pD },
           { kind: 'arc', a: pD, b: pA, center: [0, 0], radius: rWebIn, ccw: false },
         ],
-        interior: polar((rWebIn + rWebOut) / 2, angA + mod(angD - angA, 360) / 2),
+        interior: polar(rMid, angMid),
         ...zThrough,
       });
       placed++;

@@ -168,6 +168,10 @@ const WEB_VARIANTS = [
   ['lattice, sharp corners', { infill: 'lattice', lattice: { rows: 4, cornerRadius: 0 } }],
   ['auxetic, default rings', { infill: 'auxetic' }],
   ['auxetic, deep waist', { infill: 'auxetic', auxetic: { rings: 4, waist: 0.2 } }],
+  ['graded, default rings', { infill: 'graded' }],
+  ['graded, uniform rings', { infill: 'graded', graded: { grade: 0 } }],
+  ['graded, rect cells', { infill: 'graded', graded: { cellShape: 'rect', cornerRadius: 0 } }],
+  ['graded, swirled diamonds', { infill: 'graded', graded: { cellShape: 'diamond', swirl: 30 } }],
   ['voronoi, default seed', { infill: 'voronoi' }],
   ['voronoi, dense', { infill: 'voronoi', voronoi: { cells: 40, seed: 12 } }],
 ];
@@ -486,7 +490,7 @@ test('every shaped piece encloses the solid its extrusion does — voids stay vo
     ['angled', (base) => [{ ...base, tread: 'angled', treadCount: 48, treadAngle: 0 }, { ...base, tread: 'angled', treadCount: 48, treadAngle: 30 }]],
     ['chevron', (base) => [{ ...base, tread: 'chevron', treadCount: 48, treadAngle: 0 }, { ...base, tread: 'chevron', treadCount: 48, treadAngle: 30 }]],
   ];
-  for (const infill of ['solid', 'spokes', 'honeycomb', 'flexweb', 'lattice', 'auxetic', 'voronoi']) {
+  for (const infill of ['solid', 'spokes', 'honeycomb', 'flexweb', 'lattice', 'auxetic', 'graded', 'voronoi']) {
     for (const type of ['keyed', 'plain', 'hex', 'dbore', 'bolt']) {
       for (const [via, pair] of CASES) {
         const [flatCfg, loftCfg] = pair({ infill, bore: { type } });

@@ -46,6 +46,7 @@
         <button data-preset="caster">Bolt-on caster</button>
         <button data-preset="interlaced">Interlaced airless</button>
         <button data-preset="auxetic">Auxetic scooter</button>
+        <button data-preset="graded">Graded-ring airless</button>
         <button data-preset="organic">Voronoi show wheel</button>
         <button data-preset="bike">Round-section bike tire</button>
         <button data-preset="tiny">100 mm test</button>
@@ -81,6 +82,7 @@
           <option value="flexweb">Flex web (curved spokes)</option>
           <option value="lattice">Interlaced lattice</option>
           <option value="auxetic">Auxetic (re-entrant)</option>
+          <option value="graded">Graded rings (cells grow outward)</option>
           <option value="voronoi">Voronoi (organic)</option>
           <option value="solid">Solid</option>
         </select>
@@ -113,6 +115,20 @@
       <label data-show="infill:auxetic">Cell wall <input id="axWall" type="number" step="any" value="3" /></label>
       <label data-show="infill:auxetic">Waist (0.1 deep – 0.9 shallow) <input id="axWaist" type="number" step="0.05" min="0.1" max="0.9" value="0.45" /></label>
       <label data-show="infill:auxetic">Corner radius (0 = sharp) <input id="axCornerRadius" type="number" step="any" min="0" value="1.2" /></label>
+
+      <label data-show="infill:graded">Cell rings (0 = auto) <input id="grRings" type="number" step="1" min="0" max="8" value="0" /></label>
+      <label data-show="infill:graded">Cells around the wheel (0 = auto) <input id="grCells" type="number" step="1" min="0" max="240" value="0" /></label>
+      <label data-show="infill:graded">Cell wall <input id="grWall" type="number" step="any" value="2.6" /></label>
+      <label data-show="infill:graded">Cell shape
+        <select id="grCellShape">
+          <option value="hex">Hex</option>
+          <option value="rect">Rectangular</option>
+          <option value="diamond">Diamond</option>
+        </select>
+      </label>
+      <label data-show="infill:graded">Grade (0 same height – 1 grows with radius) <input id="grGrade" type="number" step="0.1" min="0" max="1" value="1" /></label>
+      <label data-show="infill:graded">Swirl (cell lean off radial, °) <input id="grSwirl" type="number" step="5" min="-60" max="60" value="0" /></label>
+      <label data-show="infill:graded">Corner radius (0 = sharp) <input id="grCornerRadius" type="number" step="any" min="0" value="1.2" /></label>
 
       <label data-show="infill:voronoi">Cells / segment (0 = auto) <input id="voCells" type="number" step="1" min="0" max="120" value="0" /></label>
       <label data-show="infill:voronoi">Cell wall <input id="voWall" type="number" step="any" value="3" /></label>

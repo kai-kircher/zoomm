@@ -16,7 +16,7 @@
 export const IN = 25.4;
 
 // Web styles the planner knows how to lay out.
-const WEB_STYLES = ['solid', 'spokes', 'honeycomb', 'flexweb', 'lattice', 'auxetic', 'voronoi'];
+const WEB_STYLES = ['solid', 'spokes', 'honeycomb', 'flexweb', 'lattice', 'auxetic', 'graded', 'voronoi'];
 
 // Per-segment void budget for the chart-drawn webs. Every void is a boolean
 // tool downstream, so the count has to stay somewhere the kernel (and the
@@ -39,7 +39,7 @@ export const DEFAULTS = Object.freeze({
   diameter: 355.6, // 14in airless-cart-wheel demo default
   width: 50,
   material: 'petg', // pla | petg | abs | tpu
-  infill: 'spokes', // solid | spokes | honeycomb | flexweb | lattice | auxetic | voronoi
+  infill: 'spokes', // solid | spokes | honeycomb | flexweb | lattice | auxetic | graded | voronoi
   spokeCount: 0, // 0 = auto
   tread: 'lugged', // slick | ribbed | lugged | diamond | chevron | angled
   treadDepth: 3.5,
@@ -83,6 +83,15 @@ export const DEFAULTS = Object.freeze({
     waist: 0.45, // re-entrant pinch: waist width ÷ cell width
     cornerRadius: 1.2, // cell corner fillet; 0 = sharp
   },
+  graded: {
+    rings: 0, // cell rings across the web band; 0 = auto
+    cells: 0, // cells around the innermost ring, for a full turn; 0 = auto
+    wall: 2.6, // material left between neighbouring cells
+    cellShape: 'hex', // hex | rect | diamond
+    grade: 1, // 0 = every ring the same height, 1 = ring height ∝ radius
+    swirl: 0, // degrees the cells lean tangentially across the band
+    cornerRadius: 1.2, // cell corner fillet; 0 = sharp
+  },
   voronoi: {
     cells: 0, // cells per segment; 0 = auto
     wall: 3, // material left between neighbouring cells
@@ -118,6 +127,8 @@ export const LENGTH_FIELDS = [
   ['auxetic', 'cellSize'],
   ['auxetic', 'wall'],
   ['auxetic', 'cornerRadius'],
+  ['graded', 'wall'],
+  ['graded', 'cornerRadius'],
   ['voronoi', 'wall'],
   ['voronoi', 'cornerRadius'],
   ['printer', 'x'],
@@ -146,6 +157,7 @@ export function normalizeParams(input = {}) {
     honeycomb: { ...structuredClone(DEFAULTS.honeycomb), ...structuredClone(input.honeycomb || {}) },
     lattice: { ...structuredClone(DEFAULTS.lattice), ...structuredClone(input.lattice || {}) },
     auxetic: { ...structuredClone(DEFAULTS.auxetic), ...structuredClone(input.auxetic || {}) },
+    graded: { ...structuredClone(DEFAULTS.graded), ...structuredClone(input.graded || {}) },
     voronoi: { ...structuredClone(DEFAULTS.voronoi), ...structuredClone(input.voronoi || {}) },
     profile: { ...structuredClone(DEFAULTS.profile), ...structuredClone(input.profile || {}) },
     printer: { ...structuredClone(DEFAULTS.printer), ...structuredClone(input.printer || {}) },
@@ -168,6 +180,10 @@ export function normalizeParams(input = {}) {
   p.lattice.struts = clamp(Math.round(Number(p.lattice.struts) || 0), 0, 96);
   p.auxetic.rings = clamp(Math.round(Number(p.auxetic.rings) || 0), 0, 6);
   p.auxetic.waist = clamp(Number(p.auxetic.waist) || DEFAULTS.auxetic.waist, 0.1, 0.9);
+  p.graded.rings = clamp(Math.round(Number(p.graded.rings) || 0), 0, 8);
+  p.graded.cells = clamp(Math.round(Number(p.graded.cells) || 0), 0, 240);
+  p.graded.grade = clamp(Number(p.graded.grade) || 0, 0, 1);
+  p.graded.swirl = clamp(Number(p.graded.swirl) || 0, -60, 60);
   p.voronoi.cells = clamp(Math.round(Number(p.voronoi.cells) || 0), 0, WEB_CELL_CAP);
   p.voronoi.seed = Math.abs(Math.round(Number(p.voronoi.seed) || 0)) % 100000;
 
@@ -204,6 +220,9 @@ export function normalizeParams(input = {}) {
   p.auxetic.cellSize = p.auxetic.cellSize > 0 ? clamp(p.auxetic.cellSize, 3, 250) : 0;
   p.auxetic.wall = clamp(p.auxetic.wall, 0.8, 25);
   p.auxetic.cornerRadius = Math.max(0, p.auxetic.cornerRadius);
+  if (!['hex', 'rect', 'diamond'].includes(p.graded.cellShape)) p.graded.cellShape = 'hex';
+  p.graded.wall = clamp(p.graded.wall, 0.8, 25);
+  p.graded.cornerRadius = Math.max(0, p.graded.cornerRadius);
   p.voronoi.wall = clamp(p.voronoi.wall, 0.8, 25);
   p.voronoi.cornerRadius = Math.max(0, p.voronoi.cornerRadius);
 
@@ -1694,6 +1713,208 @@ export function planWheel(input = {}) {
       }
     } else {
       notes.push('Auxetic cells did not fit the web band clear of the seams; web left solid.');
+      infillInfo = { style: 'solid' };
+    }
+  } else if (infill === 'graded' && bandW > 14) {
+    // Graded rings — the regular airless-tire web: concentric rings of cells
+    // that grow with the radius, small around the hub and large at the rim.
+    // Every ring shares one angular pitch, so a cell is as wide as its own
+    // radius makes it; `grade` spaces the ring boundaries geometrically so
+    // the height grows with the width and each cell comes out a scaled copy
+    // of the one inside it. `cellShape` opens or closes the cell's waist —
+    // straight-sided rect, pointed diamond, or the hexagon in between — and
+    // `swirl` leans the whole stack tangentially for a turbine web.
+    //
+    // Walls hold by construction, the same two ways the auxetic's do. Ring
+    // boundaries are pitched a full `wall` apart radially, so two cells in
+    // different rings can never come closer than that. Within a ring the
+    // angular gap subtends a `wall` chord at the ring's *inner* radius, and
+    // two points at angular separation g with radii ≥ ρ are 2ρ·sin(g/2)
+    // apart at worst — so the tightest point on that wall is the one that was
+    // measured. Swirl is a shear of the chart: at any given t it moves every
+    // cell of a ring by the same amount, which leaves both gaps alone.
+    const gr = p.graded;
+    const ch = webChart(rWebIn, rWebOut, A, N, jointOutN + 2.5);
+    const wall = gr.wall + SAG_TOL;
+    // Ring boundaries in t. Linear spacing gives every ring the same height;
+    // geometric spacing (one ratio q per ring) makes each ring's height
+    // proportional to its radius. `grade` blends the two — both are strictly
+    // increasing in k, so every blend of them is too.
+    const ringBounds = (n) => {
+      const q = (rWebOut / rWebIn) ** (1 / n);
+      const out = [];
+      for (let k = 0; k <= n; k++) {
+        const lin = rWebIn + (bandW * k) / n;
+        const r = lin + (rWebIn * q ** k - lin) * gr.grade;
+        out.push((r - rWebIn) / bandW);
+      }
+      return out;
+    };
+    // Auto ring count. The band width sets the floor, the way it does for
+    // every other web: ~26 mm of band per ring keeps cells a sensible size on
+    // the wheel. Grading then asks for more, because each ring is a fixed
+    // factor larger than the last and a band that spans a big range of radii
+    // needs the extra rings to keep that step under ~1.4x — past which the
+    // cells grow too fast to read as one pattern.
+    const byBand = bandW / 26;
+    const byRatio = Math.log(rWebOut / rWebIn) / Math.log(1.4);
+    let rings = gr.rings > 0 ? gr.rings : clamp(Math.round(Math.max(byBand, byRatio * gr.grade)), 1, 6);
+    // The innermost ring is always the shallowest; drop rings until it has
+    // real height left once its two half-walls are taken off.
+    while (rings > 1 && (ringBounds(rings)[1] - ringBounds(rings)[0]) * bandW - wall < 4) rings--;
+    const bnds = ringBounds(rings);
+    const MAX_PITCH = 30; // deg — at least a dozen cells around any full ring
+    // Half-width at a cell's flat ends, as a fraction of its half-width at the
+    // waist: 1 keeps the sides straight, 0 pulls the ends to a point.
+    const endFrac = { hex: 0.55, rect: 1, diamond: 0 }[gr.cellShape];
+    let skipped = 0;
+    let narrowed = false;
+    let pitch = 0;
+    let widths = [];
+    const build = (grow) => {
+      skipped = 0;
+      narrowed = false;
+      widths = [];
+      // One pitch for the whole web, read off the ring in the middle of the
+      // band: cells come out square there, and everything inboard and
+      // outboard of it inherits the pitch and simply takes the width its own
+      // radius buys. (Reading it off the innermost ring instead makes the
+      // number hostage to the tightest, least representative ring on the
+      // wheel — and with uniform rings, absurd.)
+      const mid = Math.floor(rings / 2);
+      const t0 = bnds[mid] + wall / 2 / bandW;
+      const t1 = bnds[mid + 1] - wall / 2 / bandW;
+      const size = ((t1 - t0) * bandW * 1.15 + wall) * grow; // ≈ square cells there
+      let want = gr.cells > 0 ? (360 / gr.cells) * grow : 2 * ch.halfDeg(size, (t0 + t1) / 2);
+      narrowed = want > MAX_PITCH;
+      want = Math.min(want, MAX_PITCH);
+      if (!(want > 0.05)) return [];
+      pitch = want;
+      const out = [];
+      for (let j = 0; j < rings; j++) {
+        const tIn = bnds[j] + wall / 2 / bandW;
+        const tOut = bnds[j + 1] - wall / 2 / bandW;
+        const tc = (tIn + tOut) / 2;
+        // A ring runs from seam keep-out to seam keep-out, and the keep-out is
+        // an angle that shrinks as the radius grows — so the run a ring has to
+        // play with is its own, several times wider at the rim than at the
+        // hub. Each ring therefore takes the whole number of cells nearest the
+        // shared pitch and stretches to fill: the pattern still grows with the
+        // radius, but no ring leaves most of a cell's width standing solid
+        // beside the joint.
+        //
+        // Swirl leans each cell off radial by that many degrees — measured on
+        // the wheel, so the lean reads the same at every radius. Leaning about
+        // the ring's own mid radius holds a cell's excursion to half its
+        // height, and the run gives that excursion back at both ends, so a
+        // swirled ring simply carries fewer cells rather than losing them to
+        // the seam.
+        const exc = r2d((Math.abs(Math.tan(d2r(gr.swirl))) * (tOut - tIn) * bandW) / 2 / ch.rAt(tc));
+        const off = (t) => r2d((Math.tan(d2r(gr.swirl)) * (t - tc) * bandW) / ch.rAt(tc));
+        const seam = N === 1 ? 0 : ch.seamDeg(tIn);
+        const lo = seam + exc;
+        const run = N === 1 ? 360 : A - 2 * lo;
+        let cols = N === 1 ? Math.max(6, Math.round(run / want)) : Math.round(run / want);
+        if (cols >= 1 && run / cols > 1.35 * want) cols++; // one fat cell → two ordinary ones
+        if (cols < 1 || (tOut - tIn) * bandW < 3) {
+          skipped++;
+          continue;
+        }
+        const pit = run / cols;
+        const alpha = pit / 2 - ch.halfDeg(wall, tIn);
+        if (alpha <= 0.05) {
+          skipped++;
+          continue;
+        }
+        // Rings brick-stagger, so the radial walls of one ring sit over the
+        // middle of the cells in the next — the bond that makes the web read
+        // as a comb rather than a stack of grilles. A ring with a single cell
+        // has nothing to stagger against and would only lose it.
+        const stag = j % 2 === 1 && cols > 1;
+        const oLo = Math.min(off(tIn), off(tOut)) - alpha;
+        const oHi = Math.max(off(tIn), off(tOut)) + alpha;
+        const centres = [];
+        // A staggered ring on a segmented wheel carries one cell fewer: the
+        // half-cell the shift pushes over each seam cannot be cut, so the
+        // joint rib simply runs wider on those rings.
+        for (let i = 0; i < (stag && N > 1 ? cols - 1 : cols); i++) {
+          const thc = N === 1 ? (i + (stag ? 0.5 : 0)) * pit : lo + (stag ? i + 1 : i + 0.5) * pit;
+          if (N === 1 || (thc + oLo >= seam - 1e-9 && thc + oHi <= A - seam + 1e-9)) centres.push(thc);
+        }
+        if (!centres.length) {
+          skipped++;
+          continue;
+        }
+        // A cell narrower than a nozzle pass or two is noise, not a pattern.
+        const cellW = 2 * ch.rAt(tc) * Math.sin(d2r(alpha));
+        if (cellW < 3) {
+          skipped++;
+          continue;
+        }
+        if (!widths.length) pitch = pit; // the count reported is the innermost ring's
+        widths.push(cellW);
+        const aEnd = endFrac * alpha;
+        for (const thc of centres) {
+          const th = (t) => thc + off(t);
+          // Walked as one cycle: outer end, out to the waist, inner end, back.
+          // A rect has no waist to visit and a diamond has no end to flatten,
+          // so each drops the vertices it does not have rather than emitting
+          // one twice over.
+          const poly = [];
+          if (aEnd > 1e-6) poly.push([th(tOut) - aEnd, tOut], [th(tOut) + aEnd, tOut]);
+          else poly.push([th(tOut), tOut]);
+          if (aEnd < alpha - 1e-6) poly.push([th(tc) + alpha, tc]);
+          if (aEnd > 1e-6) poly.push([th(tIn) + aEnd, tIn], [th(tIn) - aEnd, tIn]);
+          else poly.push([th(tIn), tIn]);
+          if (aEnd < alpha - 1e-6) poly.push([th(tc) - alpha, tc]);
+          // Every corner is convex, so a fillet only ever hands material back.
+          const pts = filletLoop(chartPolyPoints(ch, poly), gr.cornerRadius);
+          const cut = loopCutter(`grd${out.length + 1}`, pts, ch.xy(th(tc), tc), zThrough);
+          if (cut) out.push(cut);
+        }
+      }
+      return out;
+    };
+    let grow = 1;
+    let cells = build(grow);
+    const overBudget = cells.length > WEB_CELL_CAP;
+    // Cell count runs as 1/pitch, so the factor that lands on the budget can
+    // be read straight off the overshoot instead of crept up on.
+    for (let attempt = 0; attempt < 8 && cells.length > WEB_CELL_CAP; attempt++) {
+      grow *= Math.max(1.3, (cells.length / WEB_CELL_CAP) * 1.05);
+      cells = build(grow);
+    }
+    if (cells.length) {
+      shared.push(...cells);
+      infillInfo = {
+        style: 'graded',
+        rings: rings - skipped,
+        cellsPerSegment: cells.length,
+        cellsPerTurn: Math.round(360 / pitch),
+        cellShape: gr.cellShape,
+        innerCell: rnd(widths[0], 1),
+        outerCell: rnd(widths[widths.length - 1], 1),
+        wall: rnd(gr.wall, 2),
+        grade: rnd(gr.grade, 2),
+        swirl: rnd(gr.swirl, 1),
+        cornerRadius: rnd(gr.cornerRadius, 2),
+      };
+      if (gr.rings > 0 && rings !== gr.rings) {
+        notes.push(`Graded rings reduced ${gr.rings} → ${rings} so the innermost ring keeps a printable cell height.`);
+      }
+      if (overBudget) {
+        notes.push(`Graded cells widened to ${rnd(widths[0], 1)} mm at the hub to stay inside the ${WEB_CELL_CAP}-void budget.`);
+      } else if (narrowed) {
+        notes.push(`Graded cells were capped at ${MAX_PITCH}° of arc — the width asked for would have taken too big a bite out of the wheel.`);
+      }
+      if (skipped) {
+        notes.push(`${skipped} graded ring${skipped === 1 ? '' : 's'} had no room for the pattern clear of the seams; left solid.`);
+      }
+      if (gr.wall < 1.2) {
+        notes.push(`Graded wall ${rnd(gr.wall, 2)} mm is under three 0.4 mm extrusions; expect a fragile web on a stock nozzle.`);
+      }
+    } else {
+      notes.push('Graded cells did not fit the web band clear of the seams; web left solid.');
       infillInfo = { style: 'solid' };
     }
   } else if (infill === 'voronoi' && bandW > 14) {

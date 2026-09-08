@@ -36,6 +36,12 @@ const CONFIGS = [
   ['wagon-bolt-segmented', { diameter: 355.6, bore: { type: 'bolt', boltCount: 4, boltCircle: 60, boltHoleDia: 5.5, pilotDia: 12 } }],
   ['dbore-diamond-solid', { diameter: 200, width: 45, infill: 'solid', tread: 'diamond', bore: { type: 'dbore', diameter: 12 } }],
   ['cart-bolt-segmented', { bore: { type: 'bolt' }, infill: 'solid', tread: 'slick' }],
+  // Forced high segment counts, where the wedge is narrow enough to squeeze
+  // the hub dovetail. Both of these used to hand the kernel a self-crossing
+  // wire: it built a shape and reported success, and every piece failed its
+  // own validity check. Nothing else in this matrix reaches those counts.
+  ['hex-forced-16-segments', { infill: 'solid', tread: 'lugged', bore: { type: 'hex' }, segmentsOverride: 16 }],
+  ['bolt-forced-12-segments', { infill: 'solid', tread: 'lugged', bore: { type: 'bolt' }, segmentsOverride: 12 }],
   // Tread bars are notches in the piece boundary, so a busy bar pattern is a
   // long loop. Chevron and angled bars move those notches from section to
   // section, which is what the loft has to stitch; a one-piece wheel closes

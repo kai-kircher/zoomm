@@ -166,6 +166,133 @@ test('keyway crossing a segment face is clipped to the face', () => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// Self-intersection
+// ---------------------------------------------------------------------------
+// A loop that crosses itself has no defined interior, so nothing downstream of
+// it can be right: the triangulator tears the caps and reports a volume off by
+// most of the piece, and OpenCascade answers a folded wire with a solid that
+// fails its own validity check rather than with an error. The planner used to
+// emit one. A dovetail was sized from the radial band it sits in and nothing
+// measured it against the *width* of the wedge, so on a narrow sector the
+// pocket cut into face 0 broke out through face A — hex bores folded from 14
+// segments up, bolt bores from 11, and a Ø500 wheel folded on every bore type
+// at the count the solver picks for it unprompted. `jointsFor` in wheel.js
+// fits the dovetail to the wedge; this is the property that has to hold.
+
+// Neighbours closer than the planner's 1e-3 coordinate grid are one point.
+// Without this the slivers where two arcs join read as crossings.
+const weldLoop = (pts) => {
+  const out = [];
+  for (const p of pts) {
+    const last = out[out.length - 1];
+    if (last && Math.hypot(p[0] - last[0], p[1] - last[1]) < 1e-3) continue;
+    out.push(p);
+  }
+  const first = out[0];
+  while (out.length > 2 && Math.hypot(first[0] - out[out.length - 1][0], first[1] - out[out.length - 1][1]) < 1e-3) out.pop();
+  return out;
+};
+
+// Where a loop first crosses itself, or null. Edges are swept in order of
+// their left end and compared only against the ones still open at that x: a
+// 16-segment lugged wheel's profile runs to ten thousand points, and comparing
+// every pair of those over the whole matrix below takes minutes.
+function selfCrossing(loop) {
+  const n = loop.length;
+  if (n < 4) return null;
+  const edges = [];
+  for (let i = 0; i < n; i++) {
+    const a = loop[i];
+    const b = loop[(i + 1) % n];
+    edges.push({ i, a, b, lo: Math.min(a[0], b[0]), hi: Math.max(a[0], b[0]), len: Math.hypot(b[0] - a[0], b[1] - a[1]) });
+  }
+  // Proper crossing only: an endpoint two edges share is not one, and neither
+  // is a touch, so both parameters have to land strictly inside.
+  const meet = (e, f) => {
+    const ex = e.b[0] - e.a[0];
+    const ey = e.b[1] - e.a[1];
+    const fx = f.b[0] - f.a[0];
+    const fy = f.b[1] - f.a[1];
+    const den = ex * fy - ey * fx;
+    if (Math.abs(den) < 1e-14) return null; // parallel
+    const wx = f.a[0] - e.a[0];
+    const wy = f.a[1] - e.a[1];
+    const t = (wx * fy - wy * fx) / den;
+    const u = (wx * ey - wy * ex) / den;
+    if (t <= 1e-9 || t >= 1 - 1e-9 || u <= 1e-9 || u >= 1 - 1e-9) return null;
+    return [e.a[0] + t * ex, e.a[1] + t * ey];
+  };
+  const open = [];
+  for (const e of [...edges].sort((x, y) => x.lo - y.lo)) {
+    for (let k = open.length - 1; k >= 0; k--) {
+      const f = open[k];
+      if (f.hi < e.lo) {
+        open.splice(k, 1); // closed for good: every later edge starts right of it
+        continue;
+      }
+      const gap = Math.abs(e.i - f.i);
+      if (gap <= 1 || gap === n - 1) continue; // adjacent edges share an endpoint
+      const at = meet(e, f);
+      if (at) return { at, edges: [e.i, f.i], lengths: [e.len, f.len] };
+    }
+    open.push(e);
+  }
+  return null;
+}
+
+const PROFILE_BORES = [
+  ['plain', { type: 'plain', diameter: 20 }],
+  ['keyed', {}],
+  ['hex', { type: 'hex' }],
+  ['dbore', { type: 'dbore' }],
+  ['bolt', { type: 'bolt' }],
+];
+
+// Two wheels, because the profile is the outline plus every web cell as a
+// hole and both have to come out simple. The spoke web is not among them:
+// its gap quads have a self-crossing of their own that has nothing to do
+// with the dovetails (the guard on the gap angle takes `mod(...)` of a span
+// that can be negative, so a gap whose two edges have already crossed at the
+// inner web circle reads as one 359° wide and is kept). Ø200 spokes at 12
+// segments is the shortest repro; it is untouched here and still open.
+const PROFILE_WHEELS = [
+  // The wheel the fold was found on: a lugged tread notches the outer
+  // boundary and a solid web leaves the sector faces as the only other detail.
+  ['lugged solid', { infill: 'solid', tread: 'lugged', profile: { shape: 'flat' } }],
+  // Big enough that the solver reaches 16 segments unprompted, with a crowned
+  // section and a web whose cells add dozens of loops to the same profile.
+  ['Ø500 honeycomb crowned', { diameter: 500, width: 60, infill: 'honeycomb', tread: 'ribbed', profile: { shape: 'crowned', crownDrop: 4 } }],
+];
+
+test('no piece profile crosses itself, at any segment count', () => {
+  let loops = 0;
+  for (const [wheel, base] of PROFILE_WHEELS) {
+    for (const [boreName, bore] of PROFILE_BORES) {
+      for (let N = 1; N <= 16; N++) {
+        const plan = planWheel({ ...base, bore: { ...bore }, segmentsOverride: N });
+        for (const u of plan.uniquePieces) {
+          const pts = buildPieceShape(THREE, plan, u).extractPoints(48);
+          for (const [what, raw] of [['outline', pts.shape], ...pts.holes.map((h, i) => [`hole ${i}`, h])]) {
+            const loop = weldLoop(raw.map((p) => [p.x, p.y]));
+            const x = selfCrossing(loop);
+            loops++;
+            assert.equal(
+              x,
+              null,
+              x &&
+                `${wheel}, ${boreName} bore, N=${N}: piece ${u.label} ${what} folds at ` +
+                  `(${x.at[0].toFixed(2)}, ${x.at[1].toFixed(2)}) — edges ${x.edges.join(' × ')}, ` +
+                  `${x.lengths.map((l) => l.toFixed(2)).join(' mm and ')} mm long`
+            );
+          }
+        }
+      }
+    }
+  }
+  assert.ok(loops > 500, `the matrix actually ran (${loops} loops checked)`);
+});
+
 const WEB_VARIANTS = [
   ['honeycomb, default cells', { infill: 'honeycomb' }],
   ['honeycomb, tuned hex cells', { infill: 'honeycomb', honeycomb: { cellSize: 16, wall: 4 } }],
@@ -185,36 +312,56 @@ const WEB_VARIANTS = [
   ['voronoi, dense', { infill: 'voronoi', voronoi: { cells: 40, seed: 12 } }],
 ];
 
+// The segment count the solver picks, then a forced one at the top of the
+// range. The high counts used to be left out of this matrix on purpose:
+// they folded the piece profile (see `no piece profile crosses itself`
+// above), and a folded profile has no triangulation to measure. Now that
+// the planner fits its dovetails to the wedge, they belong here.
+const WEB_SEGMENTS = [0, 12, 16];
+
 for (const [variant, cfg] of WEB_VARIANTS) {
   test(`web piece triangulates cleanly, holes disjoint: ${variant}`, () => {
     // Overlapping cells fed to the triangulator as holes used to shred the
     // flat faces into slivers. A clean triangulation's flat-face area equals
     // the profile area minus the hole areas; a shredded one misses badly.
-    // Every web style and cell shape must pass.
-    const plan = planWheel(cfg);
-    assert.equal(plan.infillInfo.style, cfg.infill, `${variant} produced its web`);
-    for (const u of plan.uniquePieces) {
-      const shape = buildPieceShape(THREE, plan, u);
-      const outlinePts = shape.getPoints(96);
-      const expected =
-        Math.abs(THREE.ShapeUtils.area(outlinePts.map(({ x, y }) => ({ x, y })))) -
-        shape.holes.reduce((s, h) => s + Math.abs(THREE.ShapeUtils.area(h.getPoints(96))), 0);
-      const geo = new THREE.ExtrudeGeometry(shape, { depth: plan.W, bevelEnabled: false, curveSegments: 48 });
-      const pos = geo.getAttribute('position');
-      const idx = geo.getIndex();
-      let flatArea = 0;
-      const tri = (i) => [pos.getX(i), pos.getY(i), pos.getZ(i)];
-      const count = idx ? idx.count : pos.count;
-      const at = (n) => (idx ? idx.getX(n) : n);
-      for (let i = 0; i + 2 < count; i += 3) {
-        const [a, b, c] = [tri(at(i)), tri(at(i + 1)), tri(at(i + 2))];
-        if (Math.abs(a[2]) > 1e-6 || Math.abs(b[2]) > 1e-6 || Math.abs(c[2]) > 1e-6) continue; // bottom face only
-        flatArea += Math.abs((b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1])) / 2;
+    // Every web style and cell shape must pass, at every segment count.
+    for (const N of WEB_SEGMENTS) {
+      const plan = planWheel(N ? { ...cfg, segmentsOverride: N } : cfg);
+      const where = `${variant}, N=${plan.N}`;
+      // A forced count can leave the pattern no room, and the planner then
+      // falls back to a solid web and says so. That is its own behaviour and
+      // is tested elsewhere; what must hold here either way is that whatever
+      // the profile ends up being, it triangulates.
+      if (plan.infillInfo.style !== cfg.infill) {
+        assert.ok(N, `${where}: the count the solver picks must produce its web`);
+        assert.ok(
+          plan.notes.some((n) => /web left solid|solid web/.test(n)),
+          `${where}: fell back to a ${plan.infillInfo.style} web without saying so`
+        );
       }
-      assert.ok(
-        Math.abs(flatArea - expected) / expected < 0.02,
-        `flat face area ${flatArea.toFixed(0)} ≈ profile minus holes ${expected.toFixed(0)}`
-      );
+      for (const u of plan.uniquePieces) {
+        const shape = buildPieceShape(THREE, plan, u);
+        const outlinePts = shape.getPoints(96);
+        const expected =
+          Math.abs(THREE.ShapeUtils.area(outlinePts.map(({ x, y }) => ({ x, y })))) -
+          shape.holes.reduce((s, h) => s + Math.abs(THREE.ShapeUtils.area(h.getPoints(96))), 0);
+        const geo = new THREE.ExtrudeGeometry(shape, { depth: plan.W, bevelEnabled: false, curveSegments: 48 });
+        const pos = geo.getAttribute('position');
+        const idx = geo.getIndex();
+        let flatArea = 0;
+        const tri = (i) => [pos.getX(i), pos.getY(i), pos.getZ(i)];
+        const count = idx ? idx.count : pos.count;
+        const at = (n) => (idx ? idx.getX(n) : n);
+        for (let i = 0; i + 2 < count; i += 3) {
+          const [a, b, c] = [tri(at(i)), tri(at(i + 1)), tri(at(i + 2))];
+          if (Math.abs(a[2]) > 1e-6 || Math.abs(b[2]) > 1e-6 || Math.abs(c[2]) > 1e-6) continue; // bottom face only
+          flatArea += Math.abs((b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1])) / 2;
+        }
+        assert.ok(
+          Math.abs(flatArea - expected) / expected < 0.02,
+          `${where}, piece ${u.label}: flat face area ${flatArea.toFixed(0)} ≈ profile minus holes ${expected.toFixed(0)}`
+        );
+      }
     }
   });
 }

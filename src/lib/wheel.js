@@ -798,52 +798,114 @@ export function planWheel(input = {}) {
   // -------------------------------------------------------------------------
   // Dovetail joints (apply when the wheel is segmented)
   // -------------------------------------------------------------------------
-  const joints = [];
-  const mkJoint = (r, band, tag) => {
-    const hh = clamp(band * 0.35, 0, 6); // trapezoid head half-width (radial)
-    if (hh < 1.6) return null;
-    return {
-      r: rnd(r),
-      hn: rnd(hh * 0.62), // neck half-width at the face
-      hh: rnd(hh),
-      d: rnd(clamp(hh * 1.15, 2.5, 7)), // tangential depth of the tenon
-      tag,
-    };
+  // A joint is sized against two budgets, and only the radial one is obvious.
+  // `band` is that one: the ring of material the dovetail sits in. The other
+  // is the wedge itself. The pocket cut into face 0 reaches d + jc past that
+  // face and its inner floor corner sits at radius r − hh − jc, so the corner
+  // clears face A by
+  //     (r − hh − jc)·sin A − (d + jc)·cos A,
+  // which shrinks with the segment count and runs out on a narrow wedge. Only
+  // the radial budget used to be checked, so a hub dovetail on a small bore
+  // cut clean through the far face: the sector outline folded over itself,
+  // silently — and a folded loop has no defined triangulation and no face, so
+  // the preview caps tore and the OCCT wire is worse off still. Sizing the
+  // joint to the wedge as well keeps every profile simple. A joint shrinks
+  // before it is dropped, so the wheel keeps the seam it can still hold.
+  //
+  // This is why joints are a function of N rather than a list: the segment
+  // solver needs the tenon reach for its footprint and the tenon reach needs
+  // the segment count. `jointsFor` is pure so the solver can call it freely.
+  const jc = p.joint.clearance;
+  const JOINT_WALL = 1.2; // material left between a pocket floor and face A
+  const HEAD_MIN = 1.6; // below this a dovetail is not worth cutting
+  const headSize = (hh) => ({
+    hn: rnd(hh * 0.62), // neck half-width at the face
+    hh: rnd(hh),
+    d: rnd(clamp(hh * 1.15, 2.5, 7)), // tangential depth of the tenon
+  });
+  const headRoom = (band) => clamp(band * 0.35, 0, 6); // trapezoid head half-width (radial)
+  const bandCarries = (band) => headRoom(band) >= HEAD_MIN;
+  const wedgeClear = (r, h, A) => (r - h.hh - jc) * Math.sin(d2r(A)) - (h.d + jc) * Math.cos(d2r(A));
+  // The largest head that fits both budgets, searched on the planner's own
+  // 1e-3 grid so the numbers checked here are the numbers emitted.
+  const mkJoint = (r, band, tag, A) => {
+    // Tested on the emitted numbers: headSize rounds, wedgeClear reads.
+    const fits = (h) => wedgeClear(r, headSize(h), A) >= JOINT_WALL;
+    let hh = headRoom(band);
+    if (hh < HEAD_MIN) return null;
+    if (!fits(hh)) {
+      if (!fits(HEAD_MIN)) return null;
+      // The largest head that still fits, to the micrometre — the grid
+      // every other coordinate lands on. A wedge only ever shrinks a
+      // joint, so an unconstrained one keeps the size it always had.
+      let lo = HEAD_MIN * 1000; // fits
+      let hi = Math.round(hh * 1000); // does not
+      while (hi - lo > 1) {
+        const mid = Math.floor((lo + hi) / 2);
+        if (fits(mid / 1000)) lo = mid;
+        else hi = mid;
+      }
+      hh = lo / 1000;
+    }
+    return { r: rnd(r), ...headSize(hh), tag };
   };
-  const rimJoint = mkJoint(rRimIn + rimBandT / 2, rimBandT, 'rim');
-  if (rimJoint) joints.push(rimJoint);
-  else warnings.push('Rim band too thin for a dovetail; segments will rely on adhesive only at the rim.');
 
-  if (!solidDisk) {
-    let gaps;
-    if (b.type === 'bolt') {
-      const bcr = b.boltCircle / 2;
-      const hr = b.boltHoleDia / 2;
-      gaps = [
-        [boreMaxR + 1.2, bcr - hr - 1.5],
-        [bcr + hr + 1.5, rHub - 0.8],
-      ];
-    } else {
-      gaps = [[boreMaxR + 1.2, rHub - 0.8]];
+  // Every joint this wheel carries at N segments, innermost first, with the
+  // notes that say what a shrunken or missing one costs.
+  const jointsFor = (N) => {
+    const out = { joints: [], notes: [], warnings: [] };
+    if (N === 1) return out; // one-piece wheels have no seams
+    const A = 360 / N;
+    const add = (r, band, tag) => {
+      const j = mkJoint(r, band, tag, A);
+      if (!j) return null;
+      out.joints.push(j);
+      const full = rnd(headRoom(band));
+      if (j.hh < full) {
+        out.notes.push(
+          `Narrowed the ${tag} dovetail (head half-width ${full} → ${j.hh} mm) so its pocket keeps a wall to the opposite seam face at ${N} segments.`
+        );
+      }
+      return j;
+    };
+
+    if (!add(rRimIn + rimBandT / 2, rimBandT, 'rim')) {
+      out.warnings.push(
+        bandCarries(rimBandT)
+          ? `No dovetail fits across the rim of a ${N}-segment wedge; segments will rely on adhesive only at the rim.`
+          : 'Rim band too thin for a dovetail; segments will rely on adhesive only at the rim.'
+      );
     }
-    let best = null;
-    for (const [g0, g1] of gaps) {
-      const band = g1 - g0;
-      if (band >= 4.5 && (!best || band > best.band)) best = { g0, g1, band };
+
+    if (!solidDisk) {
+      let gaps;
+      if (b.type === 'bolt') {
+        const bcr = b.boltCircle / 2;
+        const hr = b.boltHoleDia / 2;
+        gaps = [
+          [boreMaxR + 1.2, bcr - hr - 1.5],
+          [bcr + hr + 1.5, rHub - 0.8],
+        ];
+      } else {
+        gaps = [[boreMaxR + 1.2, rHub - 0.8]];
+      }
+      let best = null;
+      for (const [g0, g1] of gaps) {
+        const band = g1 - g0;
+        if (band >= 4.5 && (!best || band > best.band)) best = { g0, g1, band };
+      }
+      if (!best || !add((best.g0 + best.g1) / 2, best.band, 'hub')) {
+        out.notes.push(
+          best && bandCarries(best.band)
+            ? `No dovetail fits across the hub end of a ${N}-segment wedge; hub joint omitted (rim joint + adhesive carry the load).`
+            : 'Hub ring too tight for a dovetail; hub joint omitted (rim joint + adhesive carry the load).'
+        );
+      }
     }
-    if (best) {
-      const j = mkJoint((best.g0 + best.g1) / 2, best.band, 'hub');
-      if (j) joints.push(j);
-    } else {
-      notes.push('Hub ring too tight for a dovetail; hub joint omitted (rim joint + adhesive carry the load).');
-    }
-  }
-  if (infill === 'solid' && rRimIn - rHub > 45) {
-    const j = mkJoint((rRimIn + rHub) / 2, 16, 'web');
-    if (j) joints.push(j);
-  }
-  joints.sort((a, z) => a.r - z.r);
-  const jointOut = joints.reduce((m, j) => Math.max(m, j.d), 0);
+    if (infill === 'solid' && rRimIn - rHub > 45) add((rRimIn + rHub) / 2, 16, 'web');
+    out.joints.sort((a, z) => a.r - z.r);
+    return out;
+  };
 
   // -------------------------------------------------------------------------
   // Segment count solver
@@ -856,6 +918,9 @@ export function planWheel(input = {}) {
   const segBBox = (N) => {
     if (N === 1) return { w: rnd(p.diameter, 1), d: rnd(p.diameter, 1) };
     const alpha = Math.PI / N;
+    // What sticks out past the wedge is the tenon this N ends up with, not
+    // the one the radial band alone would allow.
+    const jointOut = jointsFor(N).joints.reduce((m, j) => Math.max(m, j.d), 0);
     const w = 2 * (R * Math.sin(alpha) + jointOut);
     const d = R - rInner * Math.cos(alpha) + jointOut;
     return { w: rnd(w, 1), d: rnd(d, 1) };
@@ -1010,8 +1075,11 @@ export function planWheel(input = {}) {
     }
   }
   const A = 360 / N;
-  if (N === 1) joints.length = 0; // one-piece wheels have no seams
-  const jointOutN = joints.reduce((m, j) => Math.max(m, j.d), 0);
+  const jointPlan = jointsFor(N);
+  const joints = jointPlan.joints;
+  notes.push(...jointPlan.notes);
+  warnings.push(...jointPlan.warnings);
+  const jointOut = joints.reduce((m, j) => Math.max(m, j.d), 0);
   if (W > uz) {
     warnings.push(`Wheel width ${rnd(W, 1)} mm exceeds printer Z height ${uz} mm — reduce width or use a taller printer.`);
   }
@@ -1217,7 +1285,6 @@ export function planWheel(input = {}) {
   // loops, so a seed that lands in a void resolves to the wrong face.
   const seedPt = polar(rRimIn + rimBandT / 2, N === 1 ? 90 : A / 2);
 
-  const jc = p.joint.clearance;
   const sectionAt = (z, over = rimOver) => {
     if (N === 1) {
       if (!barCount) return { z: rnd(z, 4), kind: 'circle', r: rnd(R + over), interior: seedPt.map((v) => rnd(v)) };
@@ -1283,7 +1350,7 @@ export function planWheel(input = {}) {
   const outline = sections.reduce((best, s) => (Math.abs(s.z - halfW) < Math.abs(best.z - halfW) ? s : best), sections[0]);
 
   // Angular keep-out from each radial face, at a given radius.
-  const faceMarginAng = (r) => (N === 1 ? 0 : r2d((jointOutN + 2.5) / Math.max(r, 1)));
+  const faceMarginAng = (r) => (N === 1 ? 0 : r2d((jointOut + 2.5) / Math.max(r, 1)));
 
   // -------------------------------------------------------------------------
   // Shared cutters (identical for every piece): infill pockets + tread
@@ -1369,7 +1436,7 @@ export function planWheel(input = {}) {
     // normally quoted); the lattice math wants the circumradius.
     const reqCr = hc.cellSize > 0 ? hc.cellSize / Math.sqrt(3) : clamp(bandW / 8, 4, 12);
     let cr = reqCr;
-    const dFace = jointOutN + 2.5; // straight-line keep-out from each seam plane
+    const dFace = jointOut + 2.5; // straight-line keep-out from each seam plane
     const bis = A / 2;
     const eR = [Math.cos(d2r(bis)), Math.sin(d2r(bis))]; // lattice axis along the bisector
     const eT = [-eR[1], eR[0]];
@@ -1635,7 +1702,7 @@ export function planWheel(input = {}) {
     // t. Two rows and up weave. One row degenerates to triangles alternating
     // apex-in and apex-out — a chevron / V-truss.
     const lt = p.lattice;
-    const ch = webChart(rWebIn, rWebOut, A, N, jointOutN + 2.5);
+    const ch = webChart(rWebIn, rWebOut, A, N, jointOut + 2.5);
     const rMid = (rWebIn + rWebOut) / 2;
     // Squarish cells want the diamond's arc width k·P to match its radial
     // height 2·bandW/rows, which lands on struts = rows·π·rMid/bandW. The
@@ -1779,7 +1846,7 @@ export function planWheel(input = {}) {
     // g with radii ≥ ρ the distance bottoms out at 2ρ·sin(g/2) — so the
     // tightest point on that wall is the one that was measured.
     const ax = p.auxetic;
-    const ch = webChart(rWebIn, rWebOut, A, N, jointOutN + 2.5);
+    const ch = webChart(rWebIn, rWebOut, A, N, jointOut + 2.5);
     const wall = ax.wall + SAG_TOL;
     let rings = ax.rings > 0 ? ax.rings : clamp(Math.round(bandW / 26), 1, 5);
     while (rings > 1 && bandW / rings - wall < 4) rings--;
@@ -1916,7 +1983,7 @@ export function planWheel(input = {}) {
     // measured. Swirl is a shear of the chart: at any given t it moves every
     // cell of a ring by the same amount, which leaves both gaps alone.
     const gr = p.graded;
-    const ch = webChart(rWebIn, rWebOut, A, N, jointOutN + 2.5);
+    const ch = webChart(rWebIn, rWebOut, A, N, jointOut + 2.5);
     const wall = gr.wall + SAG_TOL;
     // Ring boundaries in t. Linear spacing gives every ring the same height;
     // geometric spacing (one ratio q per ring) makes each ring's height
@@ -2107,7 +2174,7 @@ export function planWheel(input = {}) {
     // machined. The PRNG is seeded from the parameter and nothing here touches
     // Math.random(), so a given seed always replans to the same web.
     const vo = p.voronoi;
-    const dFace = jointOutN + 2.5;
+    const dFace = jointOut + 2.5;
     const ch = webChart(rWebIn, rWebOut, A, N, dFace);
     const rMid = (rWebIn + rWebOut) / 2;
     const kArc = (Math.PI * rMid) / 180; // mm of arc per degree of θ, at rMid

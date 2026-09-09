@@ -63,7 +63,11 @@ from OCP.STEPControl import STEPControl_StepModelType, STEPControl_Writer
 from OCP.ShapeUpgrade import ShapeUpgrade_UnifySameDomain
 from OCP.StlAPI import StlAPI_Writer
 from OCP.TopoDS import TopoDS
-from OCP.TopTools import TopTools_ListOfShape
+
+try:  # OCP <= 7.x names the shape list after the OCCT typedef
+    from OCP.TopTools import TopTools_ListOfShape
+except ImportError:  # OCP 8.x moved the instantiated templates to `collections`
+    from OCP.collections import List_TopoDS_Shape as TopTools_ListOfShape
 from OCP.gp import gp_Ax1, gp_Ax2, gp_Circ, gp_Dir, gp_Pln, gp_Pnt, gp_Trsf, gp_Vec
 
 # Chord height allowed when the solid is triangulated for STL. Well under a
@@ -81,6 +85,29 @@ STL_ANGULAR = 0.3
 # It is still a thousand times finer than the thinnest wall the planner will
 # lay down, so nothing real can be merged away by it.
 BOOLEAN_FUZZ = 1e-3
+
+
+# The STEP writer narrates itself — a page of asterisks and transfer
+# statistics, on stdout, from OpenCascade's own C++ streams rather than
+# Python's. That buries `build.py`'s report, and because the two streams flush
+# independently it can land *after* the `--json` summary, leaving a caller that
+# reads the last line of stdout parsing a banner. Info is the only severity
+# being dropped here: a kernel warning or failure still comes through.
+# Cosmetic, so it must never be the reason a bundle fails to import.
+try:
+    from OCP.Message import Message, Message_Gravity
+
+    _printers = (getattr(Message, "DefaultMessenger", None)
+                 or Message.DefaultMessenger_s)().Printers()
+    for _i in range(1, _printers.Size() + 1):
+        _printers.Value(_i).SetTraceLevel(Message_Gravity.Message_Warning)
+except Exception:  # a chatty kernel is better than no kernel
+    pass
+
+
+# OCP <= 7.x suffixes a class's static methods with `_s`; OCP 8.x dropped that
+# for `TopoDS`, whose downcasts are all static. Bind the one we use, either way.
+_to_wire = getattr(TopoDS, "Wire", None) or TopoDS.Wire_s
 
 
 # --------------------------------------------------------------- 2D primitives
@@ -154,7 +181,7 @@ def _oriented(wire, is_ccw, want_ccw):
     the wrong way lofts an inside-out solid whose only symptom is a negative
     volume. So every wire is normalised once, here.
     """
-    return wire if is_ccw == want_ccw else TopoDS.Wire_s(wire.Reversed())
+    return wire if is_ccw == want_ccw else _to_wire(wire.Reversed())
 
 
 def wire_from_segs(segs, z=0.0, ccw=True, plane="xy"):

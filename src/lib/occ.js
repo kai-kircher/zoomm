@@ -2,8 +2,10 @@
 // generated bundle through it.
 //
 // There is no service, no account and no network here: `pip install
-// cadquery-ocp` puts OpenCascade 7.9 in a virtualenv and the kernel runs
-// locally. The only thing to discover is which interpreter has it.
+// cadquery-ocp` puts OpenCascade in a virtualenv and the kernel runs
+// locally. The only thing to discover is which interpreter has it. Both
+// the 7.x and 8.x bindings are supported; they differ on a couple of
+// names, which wheelwright_occ.py resolves at import.
 //
 // Resolution order: WHEELWRIGHT_PYTHON, then the venv `npm run setup:occ`
 // creates in ./bin, then whatever `python3`/`python`/`py -3` is on PATH — so a
@@ -143,11 +145,21 @@ export function buildPieces(files, { formats = EXPORT_FORMATS } = {}) {
       { encoding: 'utf8', timeout: BUILD_TIMEOUT_MS, windowsHide: true, maxBuffer: 32 * 1024 * 1024 }
     );
 
+    // The summary is one line of stdout, but it is not reliably the last
+    // one: OpenCascade writes through its own C++ streams, which flush on
+    // their own schedule, so kernel output can land after Python's. Take
+    // the last line that parses as a report rather than assuming where it
+    // sits.
     let report = null;
-    try {
-      report = JSON.parse((r.stdout || '').trim().split('\n').pop());
-    } catch {
-      /* fall through to the generic message below */
+    for (const line of (r.stdout || '').split('\n')) {
+      const text = line.trim();
+      if (!text.startsWith('{')) continue;
+      try {
+        const parsed = JSON.parse(text);
+        if (Array.isArray(parsed?.pieces)) report = parsed;
+      } catch {
+        /* not the report — keep looking */
+      }
     }
 
     if (r.status !== 0 || !report?.ok) {
